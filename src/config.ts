@@ -67,11 +67,12 @@ function stringArray(value: unknown, label: string): string[] {
 }
 
 function absoluteRoots(value: unknown, label: string): string[] {
-  return stringArray(value, label).map((entry, index) => {
+  const resolved = stringArray(value, label).map((entry, index) => {
     if (!path.isAbsolute(entry)) fail(`${label}[${index}] must be an absolute path, got ${JSON.stringify(entry)}`);
     if (entry.includes("\0")) fail(`${label}[${index}] must not contain a NUL byte`);
     return path.resolve(entry);
   });
+  return [...new Set(resolved)];
 }
 
 function positiveInteger(value: unknown, label: string, fallback: number, maximum?: number): number {

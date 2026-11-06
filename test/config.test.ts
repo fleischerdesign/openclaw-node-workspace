@@ -13,6 +13,9 @@ test("plugin config applies safe defaults and rejects relative roots", () => {
   assert.equal(config.gateway.maxFiles, 2000);
   assert.equal(config.node.maxArtifactBytes, 32 * 1024 * 1024);
 
+  const normalized = resolvePluginConfig({ gateway: { localRoots: ["/srv/src/", "/srv/src", "/srv/./src"] } });
+  assert.deepEqual(normalized.gateway.localRoots, ["/srv/src"]);
+
   assert.throws(
     () => resolvePluginConfig({ gateway: { localRoots: ["relative/path"] } }),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "config-invalid",

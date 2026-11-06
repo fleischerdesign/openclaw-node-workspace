@@ -190,6 +190,10 @@ the Gateway `tools.invoke` boundary, which would otherwise flatten a thrown erro
 | `unknown-outcome` | The channel failed **after** the node claimed the destination. The plugin cannot prove whether publication completed. |
 | `conflict` | A node name matches more than one paired node; use a node id. |
 
+A failed push may leave an incomplete destination: `mkdir(2)` has already claimed the name. Call
+`node_workspace_status`; it reports `complete: false` and `verified: false`. Remove that directory
+yourself after confirming no push is running; the plugin never recursively deletes a partial tree.
+
 `unknown-outcome` never claims failure. Do not retry it blindly: call `node_workspace_status` with
 the same `remotePath` first. A retry of the same content to the same destination derives the same
 push id, so if the first attempt did publish, the node re-verifies every byte and reports

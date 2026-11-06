@@ -102,7 +102,9 @@ function mapRejected(value: Record<string, unknown>): NodeWorkspaceError {
   }
   const code = typeof value.code === "string" ? value.code : "node-rejected";
   const message = typeof value.message === "string" ? value.message : "the node rejected the operation";
-  return new NodeWorkspaceError(code as NodeWorkspaceError["code"], message);
+  return new NodeWorkspaceError(code as NodeWorkspaceError["code"], message, {
+    ...(value.partial === true ? { partial: true } : {}),
+  });
 }
 
 export async function pushWorkspace(

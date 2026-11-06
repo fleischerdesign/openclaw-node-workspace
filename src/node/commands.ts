@@ -163,13 +163,13 @@ async function handlePush(
       const marker = await readMarker(destination);
       if (
         marker !== undefined &&
-        marker.state === "complete" &&
+        (marker.state === "complete" || marker.state === "legacy") &&
         marker.pushId === hello.pushId &&
         marker.digest === hello.treeDigest
       ) {
         // A marker records what a previous push claimed. Prove the current
         // bytes still match before telling the caller nothing needs to happen.
-        await verifyTreeMatches(destination, hello.manifest, hello.directories);
+        await verifyTreeMatches(destination, hello.manifest, hello.directories, { deadline });
         await session.sendControl({
           t: "result",
           ok: true,
@@ -456,7 +456,9 @@ async function handleStatus(
     drift = "legacy marker has no manifest to verify";
   } else {
     try {
-      await verifyTreeMatches(resolved.destination, marker.manifest, marker.directories);
+      await verifyTreeMatches(resolved.destination, marker.manifest, marker.directories, {
+        deadline: Date.now() + NODE_OPERATION_TIMEOUT_MS,
+      });
       verified = true;
     } catch (error) {
       drift = errorMessage(error);

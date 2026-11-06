@@ -44,7 +44,11 @@ export interface ToolFailure {
  * internal_error, which hides unknown-outcome and every other code from the
  * agent. A structured details object preserves the outcome the caller needs.
  */
-export function toolFailure(tool: string, error: unknown): ToolFailure {
+export function toolFailure(
+  tool: string,
+  error: unknown,
+  context: { node?: string; remotePath?: string; localPath?: string } = {},
+): ToolFailure {
   if (!(error instanceof NodeWorkspaceError)) throw error;
   const unknown = error.code === "unknown-outcome";
   const details: Record<string, unknown> = {
@@ -53,9 +57,12 @@ export function toolFailure(tool: string, error: unknown): ToolFailure {
     message: error.message,
     unknownOutcome: unknown,
   };
-  for (const key of ["pushId", "nodeId", "remotePath", "partial"] as const) {
+  for (const key of ["pushId", "nodeId", "remotePath", "localPath", "partial"] as const) {
     const value = error.details[key];
     if (typeof value === "string" || typeof value === "boolean") details[key] = value;
+  }
+  for (const [key, value] of Object.entries(context)) {
+    if (typeof value === "string" && details[key] === undefined) details[key] = value;
   }
   const prefix = unknown ? "UNKNOWN OUTCOME — do not retry blindly" : "failed";
   return {
@@ -180,6 +187,7 @@ const failureShape = {
   pushId: Type.Optional(Type.String()),
   nodeId: Type.Optional(Type.String()),
   remotePath: Type.Optional(Type.String()),
+  localPath: Type.Optional(Type.String()),
   partial: Type.Optional(Type.Boolean()),
 } as const;
 
@@ -192,6 +200,9 @@ const artifactFailure = Type.Object(
     code: Type.String(),
     message: Type.String(),
     unknownOutcome: Type.Boolean(),
+    nodeId: Type.Optional(Type.String()),
+    remotePath: Type.Optional(Type.String()),
+    localPath: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
 );
@@ -291,9 +302,11 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       parameters: pushParameters,
       outputSchema: pushDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
+        let context: { node?: string; remotePath?: string; localPath?: string } = {};
         try {
           const config = requireConfig(deps);
           const input = parsePushParams(params);
+          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
           const outcome = await pushWorkspace(deps.transport, config, {
             node: input.node,
             localPath: input.localPath,
@@ -348,7 +361,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
-          return toolFailure("node_workspace_push", error);
+          return toolFailure("node_workspace_push", error, context);
         }
       },
     },
@@ -362,9 +375,11 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       parameters: artifactParameters,
       outputSchema: Type.Union([artifactDetails, artifactFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
+        let context: { node?: string; remotePath?: string; localPath?: string } = {};
         try {
           const config = requireConfig(deps);
           const input = parseArtifactParams(params);
+          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
           const outcome = await fetchArtifact(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
@@ -403,7 +418,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
-          return toolFailure("node_workspace_artifact", error);
+          return toolFailure("node_workspace_artifact", error, context);
         }
       },
     },
@@ -416,9 +431,11 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       parameters: statusParameters,
       outputSchema: Type.Union([statusDetails, artifactFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+        let context: { node?: string; remotePath?: string; localPath?: string } = {};
         try {
           const config = requireConfig(deps);
           const input = parseStatusParams(params);
+          context = { node: input.node, remotePath: input.remotePath };
           const outcome: StatusOutcome = await workspaceStatus(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
@@ -447,7 +464,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
-          return toolFailure("node_workspace_status", error);
+          return toolFailure("node_workspace_status", error, context);
         }
       },
     },

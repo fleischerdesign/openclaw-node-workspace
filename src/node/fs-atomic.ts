@@ -233,20 +233,36 @@ function drift(reason: string): never {
  * that the node's copy is unchanged. This walk rejects extra, missing, linked,
  * or modified entries instead of reporting a stale copy as applied.
  */
+export interface VerifyOptions {
+  readonly deadline?: number | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
 export async function verifyTreeMatches(
   destination: string,
   manifest: readonly ManifestEntry[],
   directories: readonly string[],
+  options: VerifyOptions = {},
 ): Promise<void> {
+  const check = (): void => {
+    if (options.deadline !== undefined && Date.now() > options.deadline) {
+      throw new NodeWorkspaceError("timeout", "tree verification exceeded its deadline");
+    }
+    if (options.signal?.aborted) {
+      throw new NodeWorkspaceError("canceled", "tree verification was canceled", {}, { cause: options.signal.reason });
+    }
+  };
   const expectedFiles = new Map(sortEntries(manifest).map((entry) => [entry.path, entry]));
   const expectedDirectories = new Set(directories);
   const seenFiles = new Set<string>();
   const seenDirectories = new Set<string>();
 
   const walk = async (relativeDir: string): Promise<void> => {
+    check();
     const absoluteDir = relativeDir.length === 0 ? destination : path.join(destination, relativeDir);
     const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
     for (const entry of entries) {
+      check();
       const relative = relativeDir.length === 0 ? entry.name : `${relativeDir}/${entry.name}`;
       if (relativeDir.length === 0 && entry.name === MARKER_FILE) continue;
       const absolute = path.join(destination, ...relative.split("/"));
@@ -269,7 +285,10 @@ export async function verifyTreeMatches(
       }
       const hash = createHash("sha256");
       const stream = createReadStream(absolute);
-      for await (const chunk of stream) hash.update(chunk as Buffer);
+      for await (const chunk of stream) {
+        check();
+        hash.update(chunk as Buffer);
+      }
       if (hash.digest("hex") !== expected.sha256) drift(`published file content differs at ${relative}`);
       seenFiles.add(relative);
     }

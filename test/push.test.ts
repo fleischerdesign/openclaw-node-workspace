@@ -501,3 +501,42 @@ test("a stale staging directory does not block a first publish", async () => {
   assert.equal(outcome.status, "published");
   assert.equal(await fs.readFile(path.join(outcome.cwd, "a.txt"), "utf8"), "alpha");
 });
+
+test("a legacy marker without state or manifest is verifiable against the incoming manifest", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  const remotePath = path.join(destinationRoot, "app");
+  const input = {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath,
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  };
+  const first = await pushWorkspace(harness.transport, config.gateway, input);
+  const markerPath = path.join(remotePath, ".openclaw-node-workspace.json");
+  const marker = JSON.parse(await fs.readFile(markerPath, "utf8")) as Record<string, unknown>;
+  delete marker.state;
+  delete marker.manifest;
+  delete marker.directories;
+  await fs.writeFile(markerPath, JSON.stringify(marker));
+  const again = await pushWorkspace(harness.transport, config.gateway, input);
+  assert.equal(again.status, "already-applied");
+  assert.equal(again.pushId, first.pushId);
+});
+
+test("tree verification stops at its deadline", async () => {
+  const { verifyTreeMatches } = await import("../src/node/fs-atomic.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-verify-"));
+  await fs.writeFile(path.join(root, "a.txt"), "alpha");
+  await assert.rejects(
+    () =>
+      verifyTreeMatches(
+        root,
+        [{ path: "a.txt", size: 5, sha256: "c".repeat(64), executable: false }],
+        [],
+        { deadline: Date.now() - 1 },
+      ),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "timeout",
+  );
+});

@@ -17,8 +17,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 54
-ℹ pass 54
+ℹ tests 56
+ℹ pass 56
 ℹ fail 0
 ```
 
@@ -61,6 +61,10 @@ The first review found defects that the original suite missed. Each now has a re
 | Unvalidated tool parameters | tool-parameter assertions in `the registered push tool publishes through the injected runtime...` |
 | Root `/` containment prefix | `a root of / matches its children instead of failing on a // prefix` |
 | `tools.invoke` flattened coded errors to `internal_error` | `toolFailure preserves unknown-outcome as an actionable tool result`, integration coded refusal assertions |
+| Status verification had no deadline | `tree verification stops at its deadline` |
+| Legacy markers were ignored | `a legacy marker without state or manifest is verifiable against the incoming manifest` |
+| Root config was not normalized/deduplicated | config normalization assertion in `plugin config applies safe defaults...` |
+| Coded failures lacked operation context | `toolFailure preserves unknown-outcome as an actionable tool result` plus context fields in the failure schema |
 | Status verification and `parentExists` | `status reports verified content and drift after modification`, `status reports parentExists only for allowed paths` |
 
 ## What is not proven
