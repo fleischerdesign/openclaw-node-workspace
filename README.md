@@ -1,0 +1,216 @@
+# Node Workspace
+
+An OpenClaw plugin that publishes **one explicitly selected directory** from a Gateway to a paired
+node, and fetches **one explicitly selected artifact** back. It uses the public OpenClaw plugin SDK
+and the existing node channel: no SSH, no rsync, no remote shell, and no second transport to secure.
+
+The plugin is deliberately not a sync engine. A push is a verified, atomic one-way copy. Changes made
+after it are not propagated, and nothing on the node is ever deleted implicitly.
+
+## What it does
+
+| Tool | Effect |
+| --- | --- |
+| `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and publishes it atomically on the node. Returns the canonical node id and the remote `cwd`. |
+| `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
+| `node_workspace_status` | Read-only check of a node destination: present or absent, and whether this plugin published it (push id and tree digest). |
+
+After a push the agent runs commands itself through the native `exec` tool with `host=node`. The
+plugin does not proxy execution.
+
+## What it does not do
+
+- It does not synchronize, watch, mirror, or delete. There is no reverse workspace push.
+- It does not follow symlinks by default, preserve ownership, ACLs, xattrs, hard links, or
+  timestamps, and it does not run on Windows nodes.
+- It is not a sandbox. Configured roots are an authorization boundary, not a containment mechanism
+  against a malicious Gateway operator or a compromised node.
+
+See [Security](docs/security.md) for the precise claims and the remaining risks.
+
+## Requirements
+
+- OpenClaw `2026.11.1`, where these plugin APIs are experimental.
+- Node `24.16` or newer on the Gateway and the paired node host.
+- A POSIX node (Linux or macOS) for the node half.
+- The plugin installed and enabled on **both** sides: Gateway for the tools, node host for the
+  commands.
+
+## Install
+
+The package is private and has no license yet (see [Licensing](LICENSING.md)), so it is not
+published to npm or ClawHub. Build a tarball and install that:
+
+```bash
+npm ci
+npm run build
+npm pack
+```
+
+On the Gateway and on the node host:
+
+```bash
+openclaw plugins install npm-pack:./fleischerdesign-openclaw-node-workspace-<version>.tgz \
+  --accept-capabilities
+openclaw plugins enable node-workspace
+```
+
+`--accept-capabilities` is required because the plugin registers agent tools and node commands. Read
+the plugin source before consenting; the node commands are `nodews.push`, `nodews.fetch`, and
+`nodews.status`.
+
+Restart the node host after installing or updating:
+
+```bash
+openclaw node restart
+```
+
+## Configure
+
+Both halves read one config object; each uses its own namespace. A Gateway ignores `node.*`, and a
+node ignores `gateway.*`, so the same block can be copied to both.
+
+```json5
+{
+  plugins: {
+    entries: {
+      "node-workspace": {
+        enabled: true,
+        config: {
+          gateway: {
+            // A push may only read inside these real directories. Empty denies every push.
+            localRoots: ["/srv/projects"],
+            // An artifact may only be written inside these directories. Empty denies every fetch.
+            artifactRoots: ["/srv/incoming"],
+            // minimatch patterns relative to the selected workspace root.
+            exclude: [".git", "node_modules"],
+            // "reject" fails on a symlink; "skip" omits it. Never follows links.
+            symlinks: "reject",
+            maxFiles: 2000,
+            maxFileBytes: 33554432,
+            maxTotalBytes: 268435456,
+            maxArtifactBytes: 33554432,
+            chunkBytes: 65536,
+            timeoutMs: 120000,
+          },
+          node: {
+            // A push may only create children of these real directories.
+            pushRoots: ["/home/agent/work"],
+            // An artifact may only be read inside these real directories.
+            artifactRoots: ["/home/agent/work"],
+            maxFiles: 2000,
+            maxFileBytes: 33554432,
+            maxTotalBytes: 268435456,
+            maxArtifactBytes: 33554432,
+          },
+        },
+      },
+    },
+  },
+  gateway: {
+    nodes: {
+      commands: {
+        // Node commands are dangerous and are not allowlisted by default.
+        allow: ["nodews.push", "nodews.fetch", "nodews.status"],
+      },
+    },
+  },
+}
+```
+
+Set values with the CLI if you prefer:
+
+```bash
+openclaw config set plugins.entries.node-workspace.config.node.pushRoots '["/home/agent/work"]'
+openclaw config set gateway.nodes.commands.allow '["nodews.push","nodews.fetch","nodews.status"]'
+```
+
+Both sides must agree on the command names, and the node must advertise them. A command denied by
+`gateway.nodes.commands.deny` stays denied even if it is also in `allow`.
+
+## Use
+
+```text
+node_workspace_push(
+  node: "hom-wrk-01",
+  localPath: "/srv/projects/report",
+  remotePath: "/home/agent/work/report"
+)
+```
+
+The result names the node id and `cwd`, for example:
+
+> published: 42 files (1.83 MiB) at /home/agent/work/report on node hom-wrk-01. sha256 tree digest
+> 6f1c… One-way copy; later Gateway changes are not synchronized. Run commands there with the exec
+> tool: host=node, node=hom-wrk-01, workdir=/home/agent/work/report.
+
+Progress is reported per tool as a phase plus file and byte counts (`scanning`, `sending`,
+`publishing`); no file paths or contents enter progress text.
+
+Fetching a produced artifact:
+
+```text
+node_workspace_artifact(
+  node: "hom-wrk-01",
+  remotePath: "/home/agent/work/report/result.json",
+  localPath: "/srv/incoming/result.json"
+)
+```
+
+The destination must not exist. The bytes are verified before they are published under that name.
+
+## Failure semantics
+
+An error carries a code in its message. The important distinction is whether the effect may have
+happened.
+
+| Code | Meaning |
+| --- | --- |
+| `config-invalid` | Plugin config is missing or contradictory; nothing was dispatched. |
+| `path-invalid`, `path-outside-root`, `path-not-found`, `not-a-directory` | Path rejected before transfer. |
+| `symlink-rejected`, `special-file-rejected` | The selected tree contains a link or non-regular file and the policy is not `skip`. |
+| `limit-exceeded` | File count or byte limits rejected the operation before publication. |
+| `destination-exists` | The destination exists and was not created by this plugin, or no `replace` was requested. |
+| `destination-not-owned` | `replace=true`, but the destination has no valid plugin marker. |
+| `node-rejected` | The node returned a coded rejection; nothing was published. |
+| `protocol` | A frame was malformed or out of order. The operation failed; nothing was published. |
+| `integrity` | A digest or byte count disagreed. Treat the copy as invalid. |
+| `transport`, `timeout`, `canceled` | The channel failed **before** the node accepted the push; no effect. |
+| `unknown-outcome` | The channel failed **after** the node accepted the push. The plugin cannot prove whether publication happened. |
+| `conflict` | A staging directory or ambiguous node name conflicts with this operation. |
+
+`unknown-outcome` never claims failure. Do not retry it blindly: call `node_workspace_status` with
+the same `remotePath` first. A retry of the same content to the same destination derives the same
+push id, so if the first attempt did publish, the node reports `already-applied` instead of writing
+a second copy. A different content at an occupied destination requires `replace=true`.
+
+See [Operations](docs/operations.md) for the full runbook.
+
+## Development
+
+```bash
+npm ci
+npm run typecheck
+npm test                 # unit + in-process transport tests
+npm run build
+bash scripts/pack-and-inspect.sh        # real plugin loader, isolated disposable state
+bash scripts/integration-isolated.sh    # isolated Gateway + node host on port 19789
+```
+
+The integration scripts refuse to use the live state directory: they set
+`OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, and `HOME` under a temporary directory and clear
+`OPENCLAW_NIX_MODE` only for that disposable process.
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — the two halves, the framing protocol, and publication.
+- [Protocol](docs/protocol.md) — every frame, limit, and timeout.
+- [Security](docs/security.md) — threat model, non-goals, and residual risks.
+- [Operations](docs/operations.md) — setup, reconciliation, and troubleshooting.
+- [Verification](docs/verification.md) — what was actually run and what remains unproven.
+- [Licensing](LICENSING.md) — an open decision, not a chosen license.
+
+## Licensing
+
+**No license has been chosen.** The package is marked private and no permission is granted until
+the repository owner selects a license. Contributions are not accepted. See [LICENSING.md](LICENSING.md).
