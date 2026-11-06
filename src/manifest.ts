@@ -8,7 +8,7 @@ import { minimatch } from "minimatch";
 import type { ManifestEntry } from "./digest.js";
 import { sortEntries, treeDigest } from "./digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "./errors.js";
-import { assertSafeRelativePath, normalizeAbsolutePosixPath } from "./paths.js";
+import { MAX_MARKER_BYTES, assertSafeRelativePath, normalizeAbsolutePosixPath } from "./paths.js";
 import type { SymlinkPolicy } from "./config.js";
 import type { PushHello } from "./protocol.js";
 
@@ -257,6 +257,13 @@ export function validateManifestShape(hello: PushHello, limits: ManifestLimits):
   }
   if (totalBytes !== hello.totalBytes) {
     throw new NodeWorkspaceError("invalid-manifest", "hello.totalBytes does not match the manifest");
+  }
+  const markerBytes = Buffer.byteLength(
+    JSON.stringify({ manifest: hello.manifest, directories: hello.directories }),
+    "utf8",
+  );
+  if (markerBytes + 1024 > MAX_MARKER_BYTES) {
+    throw new NodeWorkspaceError("limit-exceeded", "manifest is too large for the node marker");
   }
 
   // Every declared directory must have its own parents declared too.

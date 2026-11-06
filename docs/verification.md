@@ -17,8 +17,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 56
-ℹ pass 56
+ℹ tests 59
+ℹ pass 59
 ℹ fail 0
 ```
 
@@ -29,7 +29,7 @@ loaded node-workspace with tools node_workspace_push, node_workspace_artifact, n
 PASS: plugin installed and loaded in isolated state /tmp/nodews-loader-…
 ```
 
-`bash scripts/integration-isolated.sh` (current code, real Gateway + node host, tool path through `tools.invoke`):
+`bash scripts/integration-isolated.sh` (recorded at `841aacf`; not rerun after the final fsync/symlink/marker-bound fixes):
 
 ```
 gateway listening on …
@@ -64,6 +64,10 @@ The first review found defects that the original suite missed. Each now has a re
 | Status verification had no deadline | `tree verification stops at its deadline` |
 | Legacy markers were ignored | `a legacy marker without state or manifest is verifiable against the incoming manifest` |
 | Root config was not normalized/deduplicated | config normalization assertion in `plugin config applies safe defaults...` |
+| Post-marker fsync failure was reported as `partial` while status said complete | `a parent fsync failure after the complete marker is an unknown outcome` |
+| A same-user parent symlink swap wrote outside the destination | `a subdirectory swapped to a symlink before a file write is rejected` (outside directory stays empty; residual race documented) |
+| Marker could exceed its reader limit | `an oversized marker manifest is rejected before publication` |
+| Failure schema did not match returned keys | TypeBox `Value.Check` on structured push failures in `test/entry.test.ts` |
 | Coded failures lacked operation context | `toolFailure preserves unknown-outcome as an actionable tool result` plus context fields in the failure schema |
 | Status verification and `parentExists` | `status reports verified content and drift after modification`, `status reports parentExists only for allowed paths` |
 

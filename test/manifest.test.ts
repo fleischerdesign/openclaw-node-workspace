@@ -119,3 +119,26 @@ test("validateManifestShape rejects traversal, duplicates, missing parents and b
     validateManifestShape({ ...hello, manifest: [], totalBytes: 0, directories: ["a/b"] }, LIMITS),
   );
 });
+
+test("an oversized marker manifest is rejected before publication", () => {
+  const files = Array.from({ length: 1100 }, (_, index) => ({
+    path: `${Array.from({ length: 16 }, () => "a".repeat(250)).join("/")}/${index}`,
+    size: 0,
+    sha256: "0".repeat(64),
+    executable: false,
+  }));
+  const hello = {
+    t: "hello" as const,
+    protocol: 2 as const,
+    pushId: "a".repeat(32),
+    remotePath: "/srv/work/app",
+    totalBytes: 0,
+    treeDigest: "b".repeat(64),
+    manifest: files,
+    directories: [] as string[],
+  };
+  assert.throws(
+    () => validateManifestShape(hello, { maxFiles: 5000, maxFileBytes: 1024, maxTotalBytes: 1024 }),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "limit-exceeded",
+  );
+});

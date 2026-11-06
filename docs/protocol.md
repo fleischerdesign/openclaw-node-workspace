@@ -108,6 +108,7 @@ requires the announced size, and compares the digest. The destination appears on
 | Data chunk | 64 KiB (max 1 MiB) | Gateway sender |
 | Duplex message | OpenClaw default (100 MiB ceiling) | SDK |
 | Control frame | 8 MiB | both |
+| Marker | 4 MiB | node, manifest checked before claim |
 | Whole operation | `timeoutMs` (default 120 s) | Gateway, absolute deadline |
 | Per-frame wait | min(120 s, remaining deadline) | Gateway and node |
 | Node operation | 300 s absolute | node |

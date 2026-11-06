@@ -7,6 +7,7 @@ import test from "node:test";
 import { resolvePluginConfig } from "../src/config.js";
 import { NodeWorkspaceError } from "../src/errors.js";
 import { pushWorkspace, type PushProgress } from "../src/gateway/push.js";
+import { workspaceStatus } from "../src/gateway/status.js";
 import { createNodeCommands } from "../src/node/commands.js";
 import { createHarness } from "./helpers/sim.js";
 
@@ -539,4 +540,87 @@ test("tree verification stops at its deadline", async () => {
       ),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "timeout",
   );
+});
+
+test("a parent fsync failure after the complete marker is an unknown outcome", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  const originalOpen = fs.open.bind(fs);
+  try {
+    (fs as unknown as { open: typeof fs.open }).open = async (target, flags, ...rest) => {
+      if (String(target) === destinationRoot && flags === "r") {
+        const error = new Error("simulated parent fsync failure") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalOpen(target, flags, ...rest);
+    };
+    await assert.rejects(
+      () =>
+        pushWorkspace(harness.transport, config.gateway, {
+          node: "node-1",
+          localPath: sourceRoot,
+          remotePath: path.join(destinationRoot, "app"),
+          exclude: undefined,
+          signal: undefined,
+          progress: undefined,
+        }),
+      (error: unknown) => error instanceof NodeWorkspaceError && error.code === "unknown-outcome",
+    );
+  } finally {
+    (fs as unknown as { open: typeof fs.open }).open = originalOpen;
+  }
+  const status = await workspaceStatus(harness.transport, config.gateway, {
+    node: "node-1",
+    remotePath: path.join(destinationRoot, "app"),
+  });
+  assert.equal(status.complete, true);
+  assert.equal(status.verified, true);
+});
+
+test("a subdirectory swapped to a symlink before a file write is rejected", async () => {
+  const sourceRoot = await workspace({ "sub/a.txt": "alpha" });
+  const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-symlink-race-"));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-symlink-out-"));
+  const raw = {
+    gateway: { localRoots: [sourceRoot], chunkBytes: 1024, timeoutMs: 20_000 },
+    node: { pushRoots: [destinationRoot] },
+  };
+  const config = resolvePluginConfig(raw);
+  const base = createHarness(createNodeCommands(raw).commands);
+  const remotePath = path.join(destinationRoot, "app");
+  let swapped = false;
+  const racing = {
+    ...base.transport,
+    async openDuplex(request: Parameters<typeof base.transport.openDuplex>[0]) {
+      const channel = await base.transport.openDuplex(request);
+      const send = channel.send.bind(channel);
+      channel.send = async (message: Uint8Array) => {
+        if (!swapped && message[0] === 2) {
+          const value = JSON.parse(Buffer.from(message.subarray(1)).toString("utf8")) as { t?: string; path?: string };
+          if (value.t === "file" && String(value.path).startsWith("sub/")) {
+            swapped = true;
+            await fs.rm(path.join(remotePath, "sub"), { recursive: true, force: true });
+            await fs.symlink(outside, path.join(remotePath, "sub"));
+          }
+        }
+        return send(message);
+      };
+      return channel;
+    },
+  };
+  await assert.rejects(
+    () =>
+      pushWorkspace(racing, config.gateway, {
+        node: "node-1",
+        localPath: sourceRoot,
+        remotePath,
+        exclude: undefined,
+        signal: undefined,
+        progress: undefined,
+      }),
+    (error: unknown) =>
+      error instanceof NodeWorkspaceError &&
+      (error.code === "symlink-rejected" || error.code === "unknown-outcome"),
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
 });

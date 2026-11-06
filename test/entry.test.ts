@@ -64,6 +64,7 @@ test("the registered push tool publishes through the injected runtime and return
   };
   const harness = createHarness(createNodeCommands(raw).commands);
   type PushTool = {
+    outputSchema?: unknown;
     execute: (
       id: string,
       params: unknown,
@@ -102,6 +103,15 @@ test("the registered push tool publishes through the injected runtime and return
   assert.match(result.content[0]?.text ?? "", /host=node/);
   assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "alpha");
 
+  await fs.writeFile(path.join(source, "a.txt"), "changed");
+  const conflict = await pushTool.execute("conflict", { node: "node-1", localPath: source, remotePath });
+  assert.equal(conflict.details.ok, false);
+  assert.equal(conflict.details.code, "destination-exists");
+  assert.equal(typeof conflict.details.pushId, "string");
+  const { Value } = await import("typebox/value");
+  assert.equal(Value.Check(pushTool.outputSchema as never, conflict.details), true);
+  assert.equal(Value.Check(pushTool.outputSchema as never, conflict.details) && conflict.details.node, "node-1");
+
   for (const args of [
     { node: "", localPath: source, remotePath },
     { node: "node-1", localPath: 5, remotePath },
@@ -111,6 +121,8 @@ test("the registered push tool publishes through the injected runtime and return
     assert.equal(bad.details.ok, false);
     assert.equal(bad.details.code, "path-invalid");
     assert.match(bad.content[0]?.text ?? "", /path-invalid/);
+    const { Value } = await import("typebox/value");
+    assert.equal(Value.Check(pushTool.outputSchema as never, bad.details), true);
   }
 });
 

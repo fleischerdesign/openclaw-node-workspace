@@ -10,9 +10,15 @@
   fails for an existing file, symlink, or directory, including an empty directory that `rename(2)`
   would have replaced. A marker only allows an `already-applied` answer after the node re-hashes
   every file against the incoming manifest; it never authorizes a rename, overwrite, or delete.
-- **No link following.** Symlinks in a selected workspace are rejected or skipped, never followed.
-  A symlink at the node's destination or at any artifact path is rejected. A symlinked destination
-  parent is rejected before resolution.
+- **No link following at the checked points.** Symlinks in a selected workspace are rejected or
+  skipped, never followed. A symlink at the node's destination or at any artifact path is rejected,
+  and a symlinked destination parent is rejected before resolution. The node re-checks every parent
+  immediately before each write.
+- **Residual same-user race.** Node has no `openat`/`O_NOFOLLOW`-across-components primitive, so a
+  process running as the same user can replace a checked parent with a symlink in the gap between the
+  check and `open`. The plugin detects that state in final verification and refuses success, but it
+  cannot guarantee containment against a concurrent same-user attacker. Run node roots under an
+  account and permissions that exclude such writers if that matters.
 - **No implicit directory creation.** A push destination's parent must already exist inside a
   configured root. The plugin does not create a chain that could escape the operator's intent.
 - **Traversal and name rules.** Manifest paths are relative, component-checked, length-bounded, and

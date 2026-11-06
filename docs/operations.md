@@ -69,6 +69,9 @@ successful copy:
   confirming no push is still running.
 - The plugin removes the claimed directory automatically only when it is empty or contains nothing
   but the incomplete marker. It never recursively deletes a partial tree or any foreign file.
+- A marker written before `state`/`manifest` existed is reported as owned but unverifiable
+  (`state: "legacy", verified: false`). An identical push still re-hashes against the incoming
+  manifest and can report `already-applied`; status cannot prove it afterward.
 
 There is no replacement path and no `rename` over a destination, so an existing file, symlink, or
 empty directory is never clobbered.

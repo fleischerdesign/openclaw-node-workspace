@@ -19,6 +19,7 @@ import {
 import { validateManifestShape } from "../manifest.js";
 import {
   assertDestinationAllowed,
+  assertSafeParent,
   claimDestination,
   cleanupIncomplete,
   fsyncDirectory,
@@ -141,7 +142,7 @@ async function handlePush(
 ): Promise<string> {
   const session = sessionFromFrames(io);
   let claimed: string | undefined;
-  let complete = false;
+  let published = false;
 
   try {
     const config = nodeConfig(state);
@@ -208,6 +209,7 @@ async function handlePush(
     await session.sendControl({ t: "accepted", pushId: hello.pushId });
 
     for (const relative of hello.directories) {
+      await assertSafeParent(destination, relative);
       const absolute = path.join(destination, ...relative.split("/"));
       try {
         await fs.mkdir(absolute, { mode: 0o700 });
@@ -277,6 +279,7 @@ async function handlePush(
         if (typeof value.path !== "string" || value.path !== entry.path) {
           throw new NodeWorkspaceError("protocol", `expected file ${entry.path}, received ${String(value.path)}`);
         }
+        await assertSafeParent(destination, entry.path);
         const absolute = path.join(destination, ...entry.path.split("/"));
         const handle = await fs.open(absolute, "wx", entry.executable ? 0o700 : 0o600);
         open = { entry, handle, hash: createHash("sha256"), received: 0 };
@@ -294,7 +297,7 @@ async function handlePush(
       throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} during push`);
     }
 
-    await verifyTreeMatches(destination, hello.manifest, hello.directories);
+    await verifyTreeMatches(destination, hello.manifest, hello.directories, { deadline });
     const digest = treeDigest({ version: 1, files: hello.manifest, directories: hello.directories });
     if (digest !== hello.treeDigest) {
       throw new NodeWorkspaceError("integrity", "recomputed tree digest does not match the declared digest");
@@ -313,9 +316,11 @@ async function handlePush(
       manifest: hello.manifest,
       directories: hello.directories,
     });
+    // The complete marker is now durable-or-at-least-written; every later
+    // failure is published=true and therefore an unknown outcome.
+    published = true;
     await fsyncTreeDirectories(destination);
     await fsyncDirectory(resolved.parent);
-    complete = true;
 
     await session.sendControl({
       t: "result",
@@ -330,7 +335,7 @@ async function handlePush(
     const failure = error instanceof NodeWorkspaceError
       ? error
       : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
-    const partial = claimed !== undefined && !complete ? await cleanupIncomplete(claimed) : false;
+    const partial = claimed !== undefined && !published ? await cleanupIncomplete(claimed) : false;
     const message = partial
       ? `${failure.message} (an incomplete publication remains at the destination; inspect it with node_workspace_status)`
       : failure.message;
@@ -340,11 +345,11 @@ async function handlePush(
         ok: false,
         code: failure.code,
         message,
-        published: complete,
+        published,
         partial,
       })
       .catch(() => undefined);
-    return JSON.stringify({ ok: false, code: failure.code, published: complete, partial });
+    return JSON.stringify({ ok: false, code: failure.code, published, partial });
   } finally {
     session.close();
   }

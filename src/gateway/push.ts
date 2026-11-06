@@ -344,6 +344,14 @@ export async function pushWorkspace(
         { cause: error },
       );
     }
+    if (error instanceof NodeWorkspaceError) {
+      throw new NodeWorkspaceError(
+        error.code,
+        error.message,
+        { pushId, nodeId, remotePath, ...error.details },
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     session?.close();

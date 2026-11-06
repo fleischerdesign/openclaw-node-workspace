@@ -4,6 +4,7 @@ import { NodeWorkspaceError } from "./errors.js";
 
 export const MARKER_FILE = ".openclaw-node-workspace.json";
 export const MAX_PATH_BYTES = 4096;
+export const MAX_MARKER_BYTES = 4 * 1024 * 1024;
 export const MAX_COMPONENT_BYTES = 255;
 
 function invalid(message: string): never {

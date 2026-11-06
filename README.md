@@ -25,8 +25,9 @@ plugin does not proxy execution.
 ## What it does not do
 
 - It does not synchronize, watch, mirror, or delete. There is no reverse workspace push.
-- It does not follow symlinks by default, preserve ownership, ACLs, xattrs, hard links, or
-  timestamps, and it does not run on Windows nodes.
+- It does not follow symlinks while scanning or resolving artifacts; node-side parent re-checks are
+  best-effort against a concurrent same-user process, as described in Security. It does not preserve
+  ownership, ACLs, xattrs, hard links, or timestamps, and it does not run on Windows nodes.
 - It is not a sandbox. Configured roots are an authorization boundary, not a containment mechanism
   against a malicious Gateway operator or a compromised node.
 

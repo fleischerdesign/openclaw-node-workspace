@@ -4,7 +4,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
-import { MARKER_FILE, assertDestinationName, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import {
+  MARKER_FILE,
+  MAX_MARKER_BYTES,
+  assertDestinationName,
+  isWithin,
+  normalizeAbsolutePosixPath,
+} from "../paths.js";
 import { sha256Hex, sortEntries, type ManifestEntry } from "../digest.js";
 
 export interface PushDestination {
@@ -149,8 +155,6 @@ export interface Marker {
   readonly directories?: readonly string[];
 }
 
-const MAX_MARKER_BYTES = 4 * 1024 * 1024;
-
 export async function readMarker(destination: string): Promise<Marker | undefined> {
   try {
     const markerPath = path.join(destination, MARKER_FILE);
@@ -197,15 +201,24 @@ export async function markerMatches(
 export async function writeMarker(directory: string, marker: Marker): Promise<void> {
   const target = path.join(directory, MARKER_FILE);
   const temp = path.join(directory, `.openclaw-node-workspace.tmp-${randomUUID()}`);
-  const handle = await fs.open(temp, "wx", 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8" });
-    await handle.sync();
-  } finally {
-    await handle.close();
+  const body = `${JSON.stringify(marker, null, 2)}\n`;
+  if (Buffer.byteLength(body, "utf8") > MAX_MARKER_BYTES) {
+    throw new NodeWorkspaceError("limit-exceeded", "marker exceeds the maximum marker size");
   }
-  await fs.rename(temp, target);
-  await fsyncDirectory(directory);
+  try {
+    const handle = await fs.open(temp, "wx", 0o600);
+    try {
+      await handle.writeFile(body, { encoding: "utf8" });
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temp, target);
+    await fsyncDirectory(directory);
+  } catch (error) {
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** Re-hash every staged file so the published bytes, not only the wire bytes, are verified. */
@@ -380,5 +393,40 @@ export async function cleanupIncomplete(destination: string): Promise<boolean> {
     return true;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Re-check every already-created parent of a relative path before writing.
+ *
+ * Node has no openat/O_NOFOLLOW-across-components primitive, so this narrows
+ * the same-user symlink race to the gap between this check and the subsequent
+ * open; it does not eliminate it. The final verifyTreeMatches pass rejects a
+ * tree that contains a symlink, and status reports the drift.
+ */
+export async function assertSafeParent(destination: string, relativePath: string): Promise<void> {
+  const rootStat = await fs.lstat(destination);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new NodeWorkspaceError("symlink-rejected", "claimed destination was replaced during publication");
+  }
+  if ((await fs.realpath(destination)) !== destination) {
+    throw new NodeWorkspaceError("symlink-rejected", "claimed destination resolves elsewhere during publication");
+  }
+  const segments = relativePath.split("/");
+  segments.pop();
+  let current = destination;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    const stat = await fs.lstat(current);
+    if (stat.isSymbolicLink()) {
+      throw new NodeWorkspaceError("symlink-rejected", `parent became a symlink during publication: ${relativePath}`);
+    }
+    if (!stat.isDirectory()) {
+      throw new NodeWorkspaceError("destination-drifted", `parent is not a directory during publication: ${relativePath}`);
+    }
+    const real = await fs.realpath(current);
+    if (real !== current) {
+      throw new NodeWorkspaceError("symlink-rejected", `parent resolves outside the claimed destination: ${relativePath}`);
+    }
   }
 }

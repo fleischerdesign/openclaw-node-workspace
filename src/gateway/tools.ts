@@ -185,6 +185,7 @@ const failureShape = {
   message: Type.String(),
   unknownOutcome: Type.Boolean(),
   pushId: Type.Optional(Type.String()),
+  node: Type.Optional(Type.String()),
   nodeId: Type.Optional(Type.String()),
   remotePath: Type.Optional(Type.String()),
   localPath: Type.Optional(Type.String()),
@@ -194,18 +195,7 @@ const failureShape = {
 const pushFailure = Type.Object(failureShape, { additionalProperties: false });
 const pushDetails = Type.Union([pushSuccess, pushFailure]);
 
-const artifactFailure = Type.Object(
-  {
-    ok: Type.Literal(false),
-    code: Type.String(),
-    message: Type.String(),
-    unknownOutcome: Type.Boolean(),
-    nodeId: Type.Optional(Type.String()),
-    remotePath: Type.Optional(Type.String()),
-    localPath: Type.Optional(Type.String()),
-  },
-  { additionalProperties: false },
-);
+const artifactFailure = pushFailure;
 
 const artifactParameters = Type.Object(
   {
