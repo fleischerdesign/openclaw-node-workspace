@@ -65,6 +65,11 @@ process is killed mid-push, the staging directory (`.<name>.nodews-<pushId>`) ma
 destination. It is never published and can be removed after confirming no push with that id is still
 running. `node_workspace_status` does not treat staging as a destination.
 
+A `replace=true` has one crash window: the previous directory is renamed to
+`.<name>.nodews-<pushId>.previous-<uuid>` before the staged tree takes its name. If the process is
+killed between those two renames, the destination is absent and the previous copy is under that
+backup name. Restore it by renaming it back; do not publish over the gap.
+
 ## Disk space
 
 The plugin checks file and byte limits before sending, but not free space on the node. A full
