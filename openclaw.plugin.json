@@ -1,0 +1,70 @@
+{
+  "id": "node-workspace",
+  "name": "Node Workspace",
+  "description": "One-way publication of an explicitly selected workspace from the Gateway to a paired node, plus selected artifact retrieval.",
+  "categories": [
+    "developer-tools"
+  ],
+  "contracts": {
+    "tools": [
+      "node_workspace_push",
+      "node_workspace_artifact",
+      "node_workspace_status"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "gateway": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "localRoots": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "artifactRoots": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "exclude": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "symlinks": {
+            "type": "string",
+            "enum": ["reject", "skip"]
+          },
+          "maxFiles": { "type": "integer", "minimum": 1 },
+          "maxFileBytes": { "type": "integer", "minimum": 1 },
+          "maxTotalBytes": { "type": "integer", "minimum": 1 },
+          "maxArtifactBytes": { "type": "integer", "minimum": 1 },
+          "chunkBytes": { "type": "integer", "minimum": 1024 },
+          "timeoutMs": { "type": "integer", "minimum": 1000 }
+        }
+      },
+      "node": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pushRoots": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "artifactRoots": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "maxFiles": { "type": "integer", "minimum": 1 },
+          "maxFileBytes": { "type": "integer", "minimum": 1 },
+          "maxTotalBytes": { "type": "integer", "minimum": 1 },
+          "maxArtifactBytes": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}

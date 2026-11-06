@@ -1,0 +1,61 @@
+{
+  "name": "@fleischerdesign/openclaw-node-workspace",
+  "version": "0.1.0",
+  "description": "Publish an explicitly selected workspace from an OpenClaw Gateway to a paired node, and retrieve selected artifacts back.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24.16"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSING.md",
+    "docs"
+  ],
+  "dependencies": {
+    "minimatch": "10.2.6",
+    "typebox": "1.3.35"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "openclaw": "2026.11.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.11.1",
+      "minGatewayVersion": "2026.11.1"
+    },
+    "build": {
+      "openclawVersion": "2026.11.1",
+      "pluginSdkVersion": "2026.11.1"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "check": "npm run build && npm test",
+    "pack:inspect": "bash scripts/pack-and-inspect.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fleischerdesign/openclaw-node-workspace.git"
+  },
+  "homepage": "https://github.com/fleischerdesign/openclaw-node-workspace",
+  "bugs": {
+    "url": "https://github.com/fleischerdesign/openclaw-node-workspace/issues"
+  }
+}

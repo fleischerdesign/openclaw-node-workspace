@@ -1,0 +1,472 @@
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+import path from "node:path";
+
+import type { NodeConfig } from "../config.js";
+import { resolvePluginConfig } from "../config.js";
+import { treeDigest } from "../digest.js";
+import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
+import { assertControlFrame, controlType, FrameSession, type DuplexChannel } from "../transport.js";
+import {
+  COMMAND_FETCH,
+  COMMAND_PUSH,
+  COMMAND_STATUS,
+  parseFetchRequest,
+  parsePushHello,
+  type PushHello,
+} from "../protocol.js";
+import { MARKER_FILE, normalizeAbsolutePosixPath } from "../paths.js";
+import { validateManifestShape } from "../manifest.js";
+import {
+  fsyncDirectory,
+  markerMatches,
+  readMarker,
+  resolveArtifactSource,
+  resolvePushDestination,
+  verifyStagedTree,
+  writeMarker,
+} from "./fs-atomic.js";
+
+const CONTROL_TIMEOUT_MS = 120_000;
+const FETCH_CHUNK_BYTES = 64 * 1024;
+
+/** Structural subset of the node-host command contract this plugin uses. */
+export interface NodeHostCommandIo {
+  readonly frames?: {
+    send(message: Uint8Array): Promise<void>;
+    onMessage(listener: (message: Uint8Array) => void | Promise<void>): () => void;
+  };
+  readonly signal?: AbortSignal;
+}
+
+export interface NodeHostCommandContext {
+  readonly signal?: AbortSignal;
+  readonly sessionKey?: string;
+}
+
+export interface NodeHostCommand {
+  readonly command: string;
+  readonly duplex?: boolean;
+  readonly dangerous?: boolean;
+  readonly hasActiveWork: () => boolean;
+  readonly handle: (
+    paramsJSON?: string | null,
+    io?: NodeHostCommandIo,
+    context?: NodeHostCommandContext,
+  ) => Promise<string>;
+}
+
+interface ConfigState {
+  readonly config: ReturnType<typeof resolvePluginConfig> | undefined;
+  readonly error: string | undefined;
+}
+
+function loadConfig(raw: unknown): ConfigState {
+  try {
+    return { config: resolvePluginConfig(raw), error: undefined };
+  } catch (error) {
+    return { config: undefined, error: errorMessage(error) };
+  }
+}
+
+function sessionFromFrames(io: NodeHostCommandIo | undefined): FrameSession {
+  const frames = io?.frames;
+  if (!frames) {
+    throw new NodeWorkspaceError("protocol", "this node does not support framed node commands");
+  }
+  const signal = io?.signal;
+  const closed = new Promise<never>((_resolve, reject) => {
+    if (!signal) return;
+    const fail = () =>
+      reject(new NodeWorkspaceError("canceled", "the Gateway canceled the node command", {}, { cause: signal.reason }));
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+  // Swallow an unhandled rejection when the channel closes after success.
+  closed.catch(() => undefined);
+  const channel: DuplexChannel = {
+    send: (message) => frames.send(message),
+    onMessage: (listener) => frames.onMessage(listener),
+    closed,
+    close: () => undefined,
+  };
+  return FrameSession.openSync(channel);
+}
+
+async function readControl(session: FrameSession, expected: readonly string[]): Promise<Record<string, unknown>> {
+  for (;;) {
+    const frame = await session.next(CONTROL_TIMEOUT_MS);
+    const value = assertControlFrame(frame);
+    const type = controlType(value);
+    if (expected.includes(type)) return value;
+    throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)}`);
+  }
+}
+
+function nodeConfig(state: ConfigState): NodeConfig {
+  if (!state.config) {
+    throw new NodeWorkspaceError("config-invalid", state.error ?? "plugin configuration is invalid");
+  }
+  return state.config.node;
+}
+
+async function lstatOrUndefined(target: string): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
+  try {
+    return await fs.lstat(target);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return undefined;
+    throw new NodeWorkspaceError("io", `cannot inspect ${target}: ${errorMessage(error)}`, {}, { cause: error });
+  }
+}
+
+async function handlePush(
+  state: ConfigState,
+  _paramsJSON: string | null | undefined,
+  io: NodeHostCommandIo | undefined,
+): Promise<string> {
+  const session = sessionFromFrames(io);
+  let staging: string | undefined;
+  let committed = false;
+  let destination: string | undefined;
+
+  try {
+    const config = nodeConfig(state);
+    const helloValue = await readControl(session, ["hello"]);
+    const hello = parsePushHello(helloValue);
+    validateManifestShape(hello, config);
+    const resolved = await resolvePushDestination(hello.remotePath, config.pushRoots);
+    destination = resolved.destination;
+
+    if (destination.endsWith(`/${MARKER_FILE}`)) {
+      throw new NodeWorkspaceError("path-invalid", "destination is reserved for the plugin marker");
+    }
+
+    const existing = await lstatOrUndefined(destination);
+    if (existing) {
+      if (existing.isSymbolicLink()) {
+        throw new NodeWorkspaceError("symlink-rejected", "destination must not be a symlink");
+      }
+      if (!existing.isDirectory()) {
+        throw new NodeWorkspaceError("destination-exists", "destination exists and is not a directory");
+      }
+      if (await markerMatches(destination, hello.pushId, hello.treeDigest)) {
+        await session.sendControl({
+          t: "result",
+          ok: true,
+          pushId: hello.pushId,
+          digest: hello.treeDigest,
+          files: hello.manifest.length,
+          bytes: hello.totalBytes,
+          replaced: false,
+        });
+        return JSON.stringify({ ok: true, alreadyApplied: true, pushId: hello.pushId });
+      }
+      if (!hello.replace) {
+        throw new NodeWorkspaceError(
+          "destination-exists",
+          "destination exists; set replace=true only to replace a directory this plugin published",
+        );
+      }
+      const marker = await readMarker(destination);
+      if (!marker) {
+        throw new NodeWorkspaceError(
+          "destination-not-owned",
+          "destination has no node-workspace marker; refusing to replace a directory this plugin did not publish",
+        );
+      }
+    }
+
+    staging = path.posix.join(resolved.parent, `.${path.posix.basename(destination)}.nodews-${hello.pushId}`);
+    if (await lstatOrUndefined(staging)) {
+      throw new NodeWorkspaceError("conflict", "a staging directory for this push id already exists");
+    }
+    await fs.mkdir(staging, { mode: 0o700 });
+    const stagingDir = staging;
+
+    for (const relative of hello.directories) {
+      const absolute = path.join(stagingDir, ...relative.split("/"));
+      await fs.mkdir(absolute, { recursive: true, mode: 0o755 });
+    }
+
+    await session.sendControl({ t: "accepted", pushId: hello.pushId });
+
+    let index = 0;
+    let bytesDone = 0;
+    let lastProgressAt = 0;
+    let open: { entry: PushHello["manifest"][number]; handle: FileHandle; hash: ReturnType<typeof createHash>; received: number } | undefined;
+
+    const finishFile = async (): Promise<void> => {
+      if (!open) return;
+      const current = open;
+      open = undefined;
+      await current.handle.sync();
+      await current.handle.close();
+      const actual = current.hash.digest("hex");
+      if (actual !== current.entry.sha256 || current.received !== current.entry.size) {
+        throw new NodeWorkspaceError("integrity", `file failed verification: ${current.entry.path}`);
+      }
+      await session.sendControl({
+        t: "file-ok",
+        path: current.entry.path,
+        bytes: current.received,
+        sha256: actual,
+      });
+    };
+
+    for (;;) {
+      const frame = await session.next(CONTROL_TIMEOUT_MS);
+      if (frame.kind === "data") {
+        if (!open) throw new NodeWorkspaceError("protocol", "received file data without a file header");
+        const remaining = open.entry.size - open.received;
+        if (frame.data.byteLength > remaining) {
+          throw new NodeWorkspaceError("protocol", `received more data than declared for ${open.entry.path}`);
+        }
+        await open.handle.write(frame.data);
+        open.hash.update(frame.data);
+        open.received += frame.data.byteLength;
+        bytesDone += frame.data.byteLength;
+        if (open.received === open.entry.size) await finishFile();
+        const now = Date.now();
+        if (now - lastProgressAt > 500 || index >= hello.manifest.length) {
+          lastProgressAt = now;
+          await session.sendControl({
+            t: "progress",
+            phase: "receiving",
+            filesDone: index,
+            bytesDone,
+          });
+        }
+        continue;
+      }
+
+      const value = assertControlFrame(frame);
+      const type = controlType(value);
+      if (type === "file") {
+        if (open) throw new NodeWorkspaceError("protocol", "new file header before the previous file completed");
+        const entry = hello.manifest[index];
+        if (!entry) throw new NodeWorkspaceError("protocol", "received more files than the manifest declares");
+        if (typeof value.path !== "string" || value.path !== entry.path) {
+          throw new NodeWorkspaceError("protocol", `expected file ${entry.path}, received ${String(value.path)}`);
+        }
+        const absolute = path.join(stagingDir, ...entry.path.split("/"));
+        const handle = await fs.open(absolute, "wx", entry.executable ? 0o755 : 0o644);
+        open = { entry, handle, hash: createHash("sha256"), received: 0 };
+        if (entry.size === 0) await finishFile();
+        index += 1;
+        continue;
+      }
+      if (type === "end") {
+        if (open) throw new NodeWorkspaceError("protocol", "end received before the current file completed");
+        if (index !== hello.manifest.length) {
+          throw new NodeWorkspaceError("protocol", "end received before every declared file was sent");
+        }
+        break;
+      }
+      throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} during push`);
+    }
+
+    if (!staging) throw new NodeWorkspaceError("protocol", "staging directory is missing");
+    await verifyStagedTree(stagingDir, hello.manifest);
+    const digest = treeDigest({ version: 1, files: hello.manifest, directories: hello.directories });
+    if (digest !== hello.treeDigest) {
+      throw new NodeWorkspaceError("integrity", "recomputed tree digest does not match the declared digest");
+    }
+    await writeMarker(stagingDir, {
+      plugin: "node-workspace",
+      protocol: 1,
+      pushId: hello.pushId,
+      digest,
+      files: hello.manifest.length,
+      bytes: hello.totalBytes,
+      createdAt: new Date().toISOString(),
+    });
+    await fsyncDirectory(stagingDir);
+    await fsyncDirectory(resolved.parent);
+
+    let replaced = false;
+    if (existing) {
+      const backup = `${stagingDir}.previous-${randomUUID()}`;
+      await fs.rename(destination, backup);
+      try {
+        await fs.rename(staging, destination);
+      } catch (error) {
+        // Restore the previous directory; the push itself did not publish.
+        await fs.rename(backup, destination).catch(() => undefined);
+        throw new NodeWorkspaceError("io", `failed to publish the staged workspace: ${errorMessage(error)}`, {}, {
+          cause: error,
+        });
+      }
+      await fs.rm(backup, { recursive: true, force: true }).catch(() => undefined);
+      replaced = true;
+    } else {
+      try {
+        await fs.rename(staging, destination);
+      } catch (error) {
+        if (isErrno(error, "EEXIST", "ENOTEMPTY")) {
+          throw new NodeWorkspaceError("destination-exists", "destination appeared while the push was staged");
+        }
+        throw new NodeWorkspaceError("io", `failed to publish the staged workspace: ${errorMessage(error)}`, {}, {
+          cause: error,
+        });
+      }
+    }
+    committed = true;
+    staging = undefined;
+
+    await session.sendControl({
+      t: "result",
+      ok: true,
+      pushId: hello.pushId,
+      digest,
+      files: hello.manifest.length,
+      bytes: hello.totalBytes,
+      replaced,
+    });
+    await fsyncDirectory(resolved.parent);
+    return JSON.stringify({ ok: true, pushId: hello.pushId, digest, replaced });
+  } catch (error) {
+    const failure = error instanceof NodeWorkspaceError
+      ? error
+      : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
+    await session
+      .sendControl({ t: "result", ok: false, code: failure.code, message: failure.message, published: committed })
+      .catch(() => undefined);
+    return JSON.stringify({ ok: false, code: failure.code, published: committed });
+  } finally {
+    if (staging && !committed) {
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+    session.close();
+  }
+}
+
+async function handleFetch(
+  state: ConfigState,
+  paramsJSON: string | null | undefined,
+  io: NodeHostCommandIo | undefined,
+): Promise<string> {
+  const session = sessionFromFrames(io);
+  let metaSent = false;
+  try {
+    const config = nodeConfig(state);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(paramsJSON ?? "{}");
+    } catch {
+      throw new NodeWorkspaceError("protocol", "fetch parameters are not valid JSON");
+    }
+    const request = parseFetchRequest(raw, config.maxArtifactBytes);
+    const source = await resolveArtifactSource(request.remotePath, config.artifactRoots);
+    const stat = await fs.lstat(source);
+    const limit = Math.min(request.maxBytes, config.maxArtifactBytes);
+    if (stat.size > limit) {
+      throw new NodeWorkspaceError("limit-exceeded", `artifact is ${stat.size} bytes, above the limit ${limit}`);
+    }
+
+    const handle = await fs.open(source, "r");
+    try {
+      await session.sendControl({ t: "meta", size: stat.size, sha256: null, mode: stat.mode & 0o777 });
+      metaSent = true;
+      const hash = createHash("sha256");
+      let sent = 0;
+      const buffer = Buffer.allocUnsafe(FETCH_CHUNK_BYTES);
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, sent);
+        if (bytesRead === 0) break;
+        const chunk = buffer.subarray(0, bytesRead);
+        hash.update(chunk);
+        await session.sendData(chunk);
+        sent += bytesRead;
+        if (sent > limit) throw new NodeWorkspaceError("limit-exceeded", "artifact grew beyond the size limit");
+      }
+      if (sent !== stat.size) {
+        throw new NodeWorkspaceError("io", "artifact changed while it was being read");
+      }
+      const digest = hash.digest("hex");
+      await session.sendControl({ t: "done", sha256: digest, bytes: sent });
+      return JSON.stringify({ ok: true, sha256: digest, bytes: sent });
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch (error) {
+    const failure = error instanceof NodeWorkspaceError
+      ? error
+      : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
+    const message = { t: metaSent ? "fetch-error" : "rejected", code: failure.code, message: failure.message };
+    await session.sendControl(message).catch(() => undefined);
+    return JSON.stringify({ ok: false, code: failure.code });
+  } finally {
+    session.close();
+  }
+}
+
+async function handleStatus(
+  state: ConfigState,
+  paramsJSON: string | null | undefined,
+): Promise<string> {
+  const config = nodeConfig(state);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(paramsJSON ?? "{}");
+  } catch {
+    throw new NodeWorkspaceError("protocol", "status parameters are not valid JSON");
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new NodeWorkspaceError("protocol", "status parameters must be an object");
+  }
+  const remotePath = (raw as Record<string, unknown>).remotePath;
+  if (typeof remotePath !== "string") {
+    throw new NodeWorkspaceError("protocol", "status.remotePath must be a string");
+  }
+  const normalized = normalizeAbsolutePosixPath(remotePath);
+  const parent = path.posix.dirname(normalized);
+  const parentStat = await lstatOrUndefined(parent);
+  if (!parentStat || !parentStat.isDirectory()) {
+    return JSON.stringify({ exists: false, parentExists: false });
+  }
+  const resolved = await resolvePushDestination(normalized, config.pushRoots);
+  const existing = await lstatOrUndefined(resolved.destination);
+  if (!existing) return JSON.stringify({ exists: false, parentExists: true });
+  if (!existing.isDirectory()) {
+    return JSON.stringify({ exists: true, owned: false, kind: existing.isDirectory() ? "directory" : "file" });
+  }
+  const marker = await readMarker(resolved.destination);
+  return JSON.stringify({
+    exists: true,
+    owned: marker !== undefined,
+    marker: marker ?? null,
+  });
+}
+
+export interface NodeCommandSet {
+  readonly commands: readonly NodeHostCommand[];
+  readonly configError: string | undefined;
+}
+
+export function createNodeCommands(rawConfig: unknown): NodeCommandSet {
+  const state = loadConfig(rawConfig);
+  const commands: NodeHostCommand[] = [
+    {
+      command: COMMAND_PUSH,
+      duplex: true,
+      dangerous: true,
+      hasActiveWork: () => false,
+      handle: (paramsJSON, io) => handlePush(state, paramsJSON, io),
+    },
+    {
+      command: COMMAND_FETCH,
+      duplex: true,
+      dangerous: true,
+      hasActiveWork: () => false,
+      handle: (paramsJSON, io) => handleFetch(state, paramsJSON, io),
+    },
+    {
+      command: COMMAND_STATUS,
+      dangerous: true,
+      hasActiveWork: () => false,
+      handle: (paramsJSON) => handleStatus(state, paramsJSON),
+    },
+  ];
+  return { commands, configError: state.error };
+}
