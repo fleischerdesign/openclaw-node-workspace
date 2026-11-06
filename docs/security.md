@@ -40,7 +40,7 @@
   against its own operator, nor a Gateway against a malicious node that fabricates a consistent
   digest.
 - **No confidentiality from the node.** Everything pushed is readable by the node's operating system
-  account according to the file modes the plugin sets (0644, or 0755 for executable source files).
+  account according to the file modes the plugin sets (0600, or 0700 for executable source files).
   The marker is 0600.
 - **No preservation of ownership, ACLs, xattrs, hard links, or timestamps.** Only content and the
   executable bit are reproduced.

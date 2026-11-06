@@ -17,8 +17,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 35
-ℹ pass 35
+ℹ tests 36
+ℹ pass 36
 ℹ fail 0
 ```
 

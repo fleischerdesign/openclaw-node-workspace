@@ -45,7 +45,8 @@ interface Waiter {
  */
 export class FrameSession {
   readonly #channel: DuplexChannel;
-  #queue: Frame[] = [];
+  #queue: { frame: Frame; bytes: number }[] = [];
+  #queuedBytes = 0;
   #waiter: Waiter | undefined;
   #closedError: Error | undefined;
   #closeReason: Error | undefined;
@@ -54,6 +55,7 @@ export class FrameSession {
   private constructor(channel: DuplexChannel) {
     this.#channel = channel;
     channel.onMessage((message) => {
+      const bytes = message.byteLength;
       let frame: Frame;
       try {
         frame = decodeFrame(message);
@@ -70,11 +72,12 @@ export class FrameSession {
       }
       // Bounded: a peer that streams without being read must not grow memory.
       // 512 small progress frames cover a 120 s file transfer at a 500 ms cadence.
-      if (this.#queue.length >= 512) {
-        this.#fail(new NodeWorkspaceError("protocol", "peer sent more than 512 unread frames"));
+      if (this.#queue.length >= 512 || this.#queuedBytes + bytes > 16 * 1024 * 1024) {
+        this.#fail(new NodeWorkspaceError("protocol", "peer sent more unread frames than the bounded queue holds"));
         return;
       }
-      this.#queue.push(frame);
+      this.#queue.push({ frame, bytes });
+      this.#queuedBytes += bytes;
     });
     void channel.closed.then(
       (value) => {
@@ -132,7 +135,13 @@ export class FrameSession {
   }
 
   async next(timeoutMs: number): Promise<Frame> {
-    if (this.#queue.length > 0) return this.#queue.shift() as Frame;
+    if (this.#queue.length > 0) {
+      const entry = this.#queue.shift();
+      if (entry) {
+        this.#queuedBytes -= entry.bytes;
+        return entry.frame;
+      }
+    }
     if (this.#closedError) throw this.#closedError;
     return await new Promise<Frame>((resolve, reject) => {
       const timer = setTimeout(() => {

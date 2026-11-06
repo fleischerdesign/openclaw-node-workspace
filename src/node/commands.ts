@@ -186,7 +186,7 @@ async function handlePush(
 
     for (const relative of hello.directories) {
       const absolute = path.join(stagingDir, ...relative.split("/"));
-      await fs.mkdir(absolute, { recursive: true, mode: 0o755 });
+      await fs.mkdir(absolute, { recursive: true, mode: 0o700 });
     }
 
     await session.sendControl({ t: "accepted", pushId: hello.pushId });
@@ -250,7 +250,7 @@ async function handlePush(
           throw new NodeWorkspaceError("protocol", `expected file ${entry.path}, received ${String(value.path)}`);
         }
         const absolute = path.join(stagingDir, ...entry.path.split("/"));
-        const handle = await fs.open(absolute, "wx", entry.executable ? 0o755 : 0o644);
+        const handle = await fs.open(absolute, "wx", entry.executable ? 0o700 : 0o600);
         open = { entry, handle, hash: createHash("sha256"), received: 0 };
         if (entry.size === 0) await finishFile();
         index += 1;

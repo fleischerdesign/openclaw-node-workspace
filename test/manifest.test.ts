@@ -116,4 +116,7 @@ test("validateManifestShape rejects traversal, duplicates, missing parents and b
   assert.throws(() => validateManifestShape({ ...hello, manifest: [{ ...hello.manifest[0]!, path: "a/x" }] }, LIMITS));
   assert.throws(() => validateManifestShape({ ...hello, totalBytes: 2 }, LIMITS));
   assert.throws(() => validateManifestShape({ ...hello, remotePath: "/srv/../etc" }, LIMITS));
+  assert.throws(() =>
+    validateManifestShape({ ...hello, manifest: [], totalBytes: 0, directories: ["a/b"] }, LIMITS),
+  );
 });

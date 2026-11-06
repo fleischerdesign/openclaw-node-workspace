@@ -255,6 +255,17 @@ export function validateManifestShape(hello: PushHello, limits: ManifestLimits):
     throw new NodeWorkspaceError("invalid-manifest", "hello.totalBytes does not match the manifest");
   }
 
+  // Every declared directory must have its own parents declared too.
+  for (const directory of hello.directories) {
+    const segments = directory.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      const prefix = segments.slice(0, index).join("/");
+      if (!directorySet.has(prefix)) {
+        throw new NodeWorkspaceError("invalid-manifest", `missing parent directory entry ${prefix} for ${directory}`);
+      }
+    }
+  }
+
   // A file cannot also be a parent directory of another entry.
   for (const entry of hello.manifest) {
     const segments = entry.path.split("/");

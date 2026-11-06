@@ -85,6 +85,24 @@ test("push publishes a verified one-way copy and reports the remote cwd", async 
   assert.deepEqual(leftovers, []);
 });
 
+test("published modes are owner-only, with the executable bit preserved", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha", "run.sh": "#!/bin/sh\n" });
+  await fs.chmod(path.join(sourceRoot, "run.sh"), 0o755);
+  const outcome = await pushWorkspace(harness.transport, config.gateway, {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "app"),
+    replace: false,
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  });
+  const plain = await fs.stat(path.join(outcome.cwd, "a.txt"));
+  const executable = await fs.stat(path.join(outcome.cwd, "run.sh"));
+  assert.equal(plain.mode & 0o777, 0o600);
+  assert.equal(executable.mode & 0o777, 0o700);
+});
+
 test("a repeated identical push is reported as already applied", async () => {
   const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const input = {
