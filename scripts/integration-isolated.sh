@@ -4,13 +4,43 @@
 # a real node invocation answers through the Gateway policy/allowlist, and the
 # plugin's own agent tools publish and fetch across the real process boundary:
 # tools.invoke -> gateway tool -> openDuplex frames -> node command handler ->
-# atomic filesystem publish. No in-process mock and no live state is involved.
+# verified filesystem publication. No in-process mock and no live state is involved.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d /tmp/nodews-int-XXXXXX)"
 GATEWAY_PID=""
 NODE_PID=""
+CHILD_PID=""
+
+# Keep a diagnostic channel that command-local redirections cannot swallow.
+exec 9>&2
+note() { printf '%s\n' "$*" >&9; }
+
+stage() { printf '[%s] == %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# A termination signal must stop the in-flight CLI child before the work tree is
+# deleted. Deleting a live state directory is exactly what makes OpenClaw log
+# "<lock>: no longer current; lock removed/replaced" and leaves a half-cleaned
+# run. The handler also ignores a second signal so cleanup cannot be interrupted.
+on_signal() {
+  local name="$1" code="$2"
+  trap '' TERM INT
+  note "FAIL: interrupted by SIG$name"
+  if [[ -n "$CHILD_PID" ]]; then
+    kill -TERM "$CHILD_PID" 2>/dev/null || true
+    for _ in $(seq 1 100); do
+      kill -0 "$CHILD_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""
+  fi
+  exit "$code"
+}
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
 
 # Never reuse a port that is already listening, and never reuse a fixed one by
 # default: an unrelated Gateway on the same port must be impossible to touch.
@@ -60,12 +90,13 @@ stop_group() {
 
 cleanup() {
   local status=$?
+  trap '' TERM INT
   stop_group "$NODE_PID"
   stop_group "$GATEWAY_PID"
   if [[ "$status" -ne 0 ]]; then
-    echo "FAILED: gateway and node logs follow (set NODEWS_KEEP_WORK=1 to keep $WORK)" >&2
-    tail -80 "$WORK/gateway.log" >&2 || true
-    tail -40 "$WORK/node.log" >&2 || true
+    note "FAILED (exit $status): gateway and node logs follow (set NODEWS_KEEP_WORK=1 to keep $WORK)"
+    [[ -f "$WORK/gateway.log" ]] && { tail -80 "$WORK/gateway.log" >&9 || true; }
+    [[ -f "$WORK/node.log" ]] && { tail -40 "$WORK/node.log" >&9 || true; }
     [[ "${NODEWS_KEEP_WORK:-0}" == "1" ]] && return
   fi
   rm -rf "$WORK"
@@ -113,7 +144,18 @@ exec env -i \
   "$@"
 HELPER
 chmod 0700 "$WORK/isolated"
-isolated() { "$WORK/isolated" "$@"; }
+# Run every child as a tracked background job so a signal handler can stop and
+# reap it before cleanup removes its state directory. Subshells (pipes) would
+# hide the PID, so no caller pipes this function directly.
+isolated() {
+  "$WORK/isolated" "$@" &
+  local pid=$!
+  CHILD_PID=$pid
+  local code=0
+  if wait "$pid"; then code=0; else code=$?; fi
+  CHILD_PID=""
+  return "$code"
+}
 mkdir -p "$WORK/tmp-gateway" "$WORK/tmp-node"
 
 # One real Gateway RPC call into a registered plugin tool. The plugin tool is
@@ -124,30 +166,58 @@ tool_call() { # tool name, JSON args object, output file
   isolated gateway openclaw gateway call tools.invoke --json --timeout 180000 --params "$params" >"$3"
 }
 
-echo "== install plugin in both isolated states"
+stage "install plugin in both isolated states"
 for side in gateway node; do
   isolated "$side" openclaw plugins install "npm-pack:$TARBALL" --force --accept-capabilities >/dev/null
 done
 
-echo "== configure gateway"
-isolated gateway openclaw config set gateway.mode local >/dev/null
-isolated gateway openclaw config set gateway.bind loopback >/dev/null
-isolated gateway openclaw config set gateway.port "$PORT" >/dev/null
-isolated gateway openclaw config set gateway.auth.mode none >/dev/null
-isolated gateway openclaw config set gateway.nodes.commands.allow \
-  '["nodews.push","nodews.fetch","nodews.status"]' >/dev/null
-isolated gateway openclaw config set plugins.entries.node-workspace.config.gateway.localRoots \
-  "[\"$WORK/gateway-root/src\"]" >/dev/null
-isolated gateway openclaw config set plugins.entries.node-workspace.config.gateway.artifactRoots \
-  "[\"$WORK/gateway-root/artifacts\"]" >/dev/null
+stage "configure gateway and node with one validated patch each"
+node - "$WORK" "$PORT" <<'PATCH_JSON'
+const fs = require("node:fs");
+const path = require("node:path");
+const [work, port] = process.argv.slice(2);
+const gateway = {
+  gateway: {
+    mode: "local",
+    bind: "loopback",
+    port: Number(port),
+    auth: { mode: "none" },
+    nodes: { commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] } },
+  },
+  plugins: {
+    entries: {
+      "node-workspace": {
+        config: {
+          gateway: {
+            localRoots: [path.join(work, "gateway-root", "src")],
+            artifactRoots: [path.join(work, "gateway-root", "artifacts")],
+          },
+        },
+      },
+    },
+  },
+};
+const node = {
+  plugins: {
+    entries: {
+      "node-workspace": {
+        config: {
+          node: {
+            pushRoots: [path.join(work, "node-root")],
+            artifactRoots: [path.join(work, "node-root")],
+          },
+        },
+      },
+    },
+  },
+};
+fs.writeFileSync(path.join(work, "gateway-patch.json"), JSON.stringify(gateway, null, 2));
+fs.writeFileSync(path.join(work, "node-patch.json"), JSON.stringify(node, null, 2));
+PATCH_JSON
+isolated gateway openclaw config patch --file "$WORK/gateway-patch.json" >/dev/null
+isolated node openclaw config patch --file "$WORK/node-patch.json" >/dev/null
 
-echo "== configure node"
-isolated node openclaw config set plugins.entries.node-workspace.config.node.pushRoots \
-  "[\"$WORK/node-root\"]" >/dev/null
-isolated node openclaw config set plugins.entries.node-workspace.config.node.artifactRoots \
-  "[\"$WORK/node-root\"]" >/dev/null
-
-echo "== start gateway on $PORT"
+stage "start gateway on $PORT"
 setsid "$WORK/isolated" gateway openclaw gateway --port "$PORT" --bind loopback >"$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 READY=0
@@ -161,16 +231,17 @@ done
 [[ "$READY" == 1 ]] || { echo "FAIL: gateway did not listen on $PORT" >&2; tail -40 "$WORK/gateway.log" >&2; exit 1; }
 echo "gateway listening on $PORT"
 
-echo "== start node host"
+stage "start node host"
 setsid "$WORK/isolated" node openclaw node run --host 127.0.0.1 --port "$PORT" --no-tls --display-name "integration-node" \
   --commands nodews.push,nodews.fetch,nodews.status >"$WORK/node.log" 2>&1 &
 NODE_PID=$!
 
-echo "== wait for pairing"
+stage "wait for pairing"
 for _ in $(seq 1 90); do
   isolated gateway openclaw nodes list --json >"$WORK/nodes.json" 2>/dev/null || true
   if grep -q 'integration-node' "$WORK/nodes.json"; then break; fi
-  if isolated gateway openclaw nodes pending --json 2>/dev/null | grep -q 'integration-node'; then
+  isolated gateway openclaw nodes pending --json >"$WORK/pending-probe.json" 2>/dev/null || true
+  if grep -q 'integration-node' "$WORK/pending-probe.json"; then
     isolated gateway openclaw nodes pending --json >"$WORK/pending.json" 2>&1 || true
     REQUEST_ID="$(node -e 'const fs=require("fs");try{const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const rows=j.pending??j.requests??j;const first=Array.isArray(rows)?rows[0]:rows;console.log(first?.requestId??first?.id??"")}catch{console.log("")}' "$WORK/pending.json")"
     if [[ -n "$REQUEST_ID" ]]; then isolated gateway openclaw nodes approve "$REQUEST_ID" >/dev/null; fi
@@ -192,12 +263,14 @@ for (const command of ["nodews.push", "nodews.fetch", "nodews.status"]) {
 console.log(`node advertised ${node.commands.join(", ")}`);
 NODE
 
-echo "== describe node"
-isolated gateway openclaw nodes describe --node "$NODE_ID" 2>&1 | tee "$WORK/describe.txt" || true
+stage "describe node"
+isolated gateway openclaw nodes describe --node "$NODE_ID" >"$WORK/describe.txt" 2>&1 || true
+cat "$WORK/describe.txt"
 
-echo "== invoke nodews.status through the real Gateway and node"
+stage "invoke nodews.status through the real Gateway and node"
 isolated gateway openclaw nodes invoke --node "$NODE_ID" --command nodews.status \
-  --params "{\"remotePath\":\"$WORK/node-root/pushed\"}" 2>&1 | tee "$WORK/invoke.txt"
+  --params "{\"remotePath\":\"$WORK/node-root/pushed\"}" >"$WORK/invoke.txt" 2>&1
+cat "$WORK/invoke.txt"
 
 node - "$WORK/invoke.txt" <<'NODE'
 const fs = require("node:fs");
@@ -212,7 +285,7 @@ REMOTE_APP="$WORK/node-root/app"
 PUSH1_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:"integration-node",localPath:process.argv[1],remotePath:process.argv[2]}))' \
   "$WORK/gateway-root/src" "$REMOTE_APP")"
 
-echo "== publish through the plugin tool: tools.invoke -> openDuplex -> nodews.push"
+stage "publish through the plugin tool: tools.invoke -> openDuplex -> nodews.push"
 tool_call node_workspace_push "$PUSH1_ARGS" "$WORK/tool-push1.json"
 cat "$WORK/tool-push1.json"
 
@@ -263,7 +336,7 @@ if (marker.files !== details.files || marker.bytes !== details.bytes) throw new 
 console.log(`published tree matches the source: ${details.files} files, digest ${details.digest.slice(0, 12)}…`);
 NODE
 
-echo "== refuse to mutate an existing destination through the plugin tool"
+stage "refuse to mutate an existing destination through the plugin tool"
 printf 'added after publication\n' > "$WORK/gateway-root/src/second.txt"
 PUSH_AGAIN_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:"integration-node",localPath:process.argv[1],remotePath:process.argv[2]}))' \
   "$WORK/gateway-root/src" "$REMOTE_APP")"
@@ -291,7 +364,7 @@ if (fs.existsSync(path.join(app, "second.txt"))) throw new Error("a refused push
 console.log("coded refusal reached the tool result and the destination stayed untouched");
 NODE
 
-echo "== fetch an artifact through the plugin tool: tools.invoke -> openDuplex -> nodews.fetch"
+stage "fetch an artifact through the plugin tool: tools.invoke -> openDuplex -> nodews.fetch"
 ARTIFACT_LOCAL="$WORK/gateway-root/artifacts/result.txt"
 ARTIFACT_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:process.argv[1],remotePath:process.argv[2],localPath:process.argv[3]}))' \
   "$NODE_ID" "$WORK/node-root/pushed/result.txt" "$ARTIFACT_LOCAL")"
@@ -319,7 +392,7 @@ if (details.localPath !== local) throw new Error("tool reported a different dest
 console.log(`artifact bytes verified: ${details.bytes} bytes, sha256 ${digest.slice(0, 12)}…`);
 NODE
 
-echo "== refuse to overwrite an existing artifact destination (structured result, file untouched)"
+stage "refuse to overwrite an existing artifact destination (structured result, file untouched)"
 tool_call node_workspace_artifact "$ARTIFACT_ARGS" "$WORK/tool-artifact-again.json"
 cat "$WORK/tool-artifact-again.json"
 
@@ -340,7 +413,7 @@ if (fs.readFileSync(path.join(artifactDir, "result.txt"), "utf8") !== "artifact 
 console.log("existing artifact refused with a coded result and left untouched");
 NODE
 
-echo "== verify the published tree through the plugin status tool"
+stage "verify the published tree through the plugin status tool"
 STATUS_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:process.argv[1],remotePath:process.argv[2]}))' \
   "$NODE_ID" "$REMOTE_APP")"
 tool_call node_workspace_status "$STATUS_ARGS" "$WORK/tool-status.json"
