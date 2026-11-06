@@ -44,13 +44,13 @@ returns the cwd precisely so the agent can choose the next action.
 
 ## Reconcile an unknown outcome
 
-`unknown-outcome` means the channel died after the node accepted the push. The plugin cannot prove
-whether the rename happened.
+`unknown-outcome` means the channel died after the node claimed the destination. The plugin cannot
+prove whether the publication completed.
 
 1. Call `node_workspace_status` with the same `remotePath`.
-2. If it reports `exists: true, owned: true, verified: true` with the expected `digest`, the push
-   succeeded. The node re-hashed the directory against the manifest; the marker alone is not the
-   proof.
+2. If it reports `exists: true, owned: true, complete: true, verified: true` with the expected
+   `digest`, the push succeeded. The node re-hashed the directory against the manifest; the marker
+   alone is not the proof.
 3. If it reports `exists: false`, the push did not publish; retrying the same content is safe.
 4. If it reports `verified: false` or `owned: false`, inspect the directory manually. Never delete
    or replace a directory you did not create; the plugin itself will not.
@@ -58,21 +58,26 @@ whether the rename happened.
 Do not retry by changing `remotePath` to get around a conflict. That creates a second copy and hides
 the state you are trying to reconcile.
 
-## Partial or stale copies
+## Partial publications
 
-There are none, by construction: a destination is either absent or a complete verified tree. If a
-process is killed mid-push, the staging directory (`.<name>.nodews-<pushId>-<suffix>`) may remain next
-to the destination. It is never published, never blocks a later attempt, and can be removed after
-confirming no push is still running. `node_workspace_status` does not treat staging as a destination.
+The destination name is claimed with `mkdir(2)` before files arrive, so a process killed mid-push
+leaves a directory with `state: "incomplete"` and some files. It is never silently treated as a
+successful copy:
 
-There is no replacement path, so there is no swap window: the only mutation of the destination
-namespace is one `rename` that requires the name to be absent.
+- `node_workspace_status` reports `exists: true, owned: true, complete: false, verified: false`.
+- A retry to the same path is `destination-exists`; remove the incomplete directory yourself after
+  confirming no push is still running.
+- The plugin removes the claimed directory automatically only when it is empty or contains nothing
+  but the incomplete marker. It never recursively deletes a partial tree or any foreign file.
+
+There is no replacement path and no `rename` over a destination, so an existing file, symlink, or
+empty directory is never clobbered.
 
 ## Disk space
 
 The plugin checks file and byte limits before sending, but not free space on the node. A full
-filesystem fails the push with an I/O error before publication; staging is removed on a best-effort
-basis. Leave headroom for the largest configured push; publication itself allocates no second full copy.
+filesystem fails the push with an I/O error; an incomplete destination is left with its marker. Leave
+headroom for the largest configured push; publication allocates no second full copy.
 
 ## Upgrades
 

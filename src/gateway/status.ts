@@ -11,6 +11,7 @@ export interface StatusOutcome {
   readonly exists: boolean;
   readonly parentExists: boolean;
   readonly owned: boolean;
+  readonly complete: boolean;
   readonly verified: boolean;
   readonly drift: string | null;
   readonly marker: Marker | null;
@@ -78,6 +79,7 @@ export async function workspaceStatus(
     exists: value.exists,
     parentExists: value.parentExists === true,
     owned: value.owned === true,
+    complete: value.complete === true,
     verified: value.verified === true,
     drift: typeof value.drift === "string" ? value.drift : null,
     marker,

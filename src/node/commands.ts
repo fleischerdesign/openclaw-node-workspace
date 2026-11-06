@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
@@ -19,14 +19,14 @@ import {
 import { validateManifestShape } from "../manifest.js";
 import {
   assertDestinationAllowed,
+  claimDestination,
+  cleanupIncomplete,
   fsyncDirectory,
   fsyncTreeDirectories,
-  markerMatches,
   readMarker,
   resolveArtifactSource,
   resolvePushDestination,
   safeArtifactMode,
-  verifyStagedTree,
   verifyTreeMatches,
   writeMarker,
 } from "./fs-atomic.js";
@@ -140,8 +140,8 @@ async function handlePush(
   io: NodeHostCommandIo | undefined,
 ): Promise<string> {
   const session = sessionFromFrames(io);
-  let staging: string | undefined;
-  let committed = false;
+  let claimed: string | undefined;
+  let complete = false;
 
   try {
     const config = nodeConfig(state);
@@ -160,7 +160,13 @@ async function handlePush(
       if (!existing.isDirectory()) {
         throw new NodeWorkspaceError("destination-exists", "destination exists and is not a directory");
       }
-      if (await markerMatches(destination, hello.pushId, hello.treeDigest)) {
+      const marker = await readMarker(destination);
+      if (
+        marker !== undefined &&
+        marker.state === "complete" &&
+        marker.pushId === hello.pushId &&
+        marker.digest === hello.treeDigest
+      ) {
         // A marker records what a previous push claimed. Prove the current
         // bytes still match before telling the caller nothing needs to happen.
         await verifyTreeMatches(destination, hello.manifest, hello.directories);
@@ -176,24 +182,42 @@ async function handlePush(
       }
       throw new NodeWorkspaceError(
         "destination-exists",
-        "destination exists with different content; this plugin never replaces an existing directory. Choose a new remotePath or remove the old copy yourself.",
+        marker?.state === "incomplete"
+          ? "destination holds an incomplete publication; inspect it with node_workspace_status and remove it yourself before retrying"
+          : "destination exists with different content; this plugin never replaces an existing directory. Choose a new remotePath or remove the old copy yourself.",
       );
     }
 
-    const suffix = randomUUID().slice(0, 8);
-    staging = path.posix.join(
-      resolved.parent,
-      `.${path.posix.basename(destination)}.nodews-${hello.pushId}-${suffix}`,
-    );
-    await fs.mkdir(staging, { mode: 0o700 });
-    const stagingDir = staging;
-
-    for (const relative of hello.directories) {
-      const absolute = path.join(stagingDir, ...relative.split("/"));
-      await fs.mkdir(absolute, { recursive: true, mode: 0o700 });
-    }
+    // mkdir(2) is the no-clobber claim. It fails for an empty directory too,
+    // unlike rename(2), which would silently replace one.
+    await claimDestination(destination);
+    claimed = destination;
+    await writeMarker(destination, {
+      plugin: "node-workspace",
+      protocol: 1,
+      pushId: hello.pushId,
+      digest: hello.treeDigest,
+      files: hello.manifest.length,
+      bytes: hello.totalBytes,
+      createdAt: new Date().toISOString(),
+      state: "incomplete",
+      manifest: hello.manifest,
+      directories: hello.directories,
+    });
 
     await session.sendControl({ t: "accepted", pushId: hello.pushId });
+
+    for (const relative of hello.directories) {
+      const absolute = path.join(destination, ...relative.split("/"));
+      try {
+        await fs.mkdir(absolute, { mode: 0o700 });
+      } catch (error) {
+        if (isErrno(error, "EEXIST")) {
+          throw new NodeWorkspaceError("destination-drifted", `directory appeared during publication: ${relative}`);
+        }
+        throw error;
+      }
+    }
 
     let index = 0;
     let bytesDone = 0;
@@ -253,7 +277,7 @@ async function handlePush(
         if (typeof value.path !== "string" || value.path !== entry.path) {
           throw new NodeWorkspaceError("protocol", `expected file ${entry.path}, received ${String(value.path)}`);
         }
-        const absolute = path.join(stagingDir, ...entry.path.split("/"));
+        const absolute = path.join(destination, ...entry.path.split("/"));
         const handle = await fs.open(absolute, "wx", entry.executable ? 0o700 : 0o600);
         open = { entry, handle, hash: createHash("sha256"), received: 0 };
         if (entry.size === 0) await finishFile();
@@ -270,12 +294,14 @@ async function handlePush(
       throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} during push`);
     }
 
-    await verifyStagedTree(stagingDir, hello.manifest);
+    await verifyTreeMatches(destination, hello.manifest, hello.directories);
     const digest = treeDigest({ version: 1, files: hello.manifest, directories: hello.directories });
     if (digest !== hello.treeDigest) {
       throw new NodeWorkspaceError("integrity", "recomputed tree digest does not match the declared digest");
     }
-    await writeMarker(stagingDir, {
+    // Replace only our own marker file atomically; the destination name was
+    // already claimed and is never renamed over.
+    await writeMarker(destination, {
       plugin: "node-workspace",
       protocol: 1,
       pushId: hello.pushId,
@@ -283,28 +309,13 @@ async function handlePush(
       files: hello.manifest.length,
       bytes: hello.totalBytes,
       createdAt: new Date().toISOString(),
+      state: "complete",
       manifest: hello.manifest,
       directories: hello.directories,
     });
-    await fsyncTreeDirectories(stagingDir);
-
-    try {
-      await fs.rename(stagingDir, destination);
-    } catch (error) {
-      if (isErrno(error, "EEXIST", "ENOTEMPTY")) {
-        throw new NodeWorkspaceError("destination-exists", "destination appeared while the push was staged");
-      }
-      throw new NodeWorkspaceError("io", `failed to publish the staged workspace: ${errorMessage(error)}`, {}, {
-        cause: error,
-      });
-    }
-    committed = true;
-    staging = undefined;
-
-    // Durability of the rename precedes the success acknowledgement. If this
-    // fails, the node reports published=true and the Gateway treats the
-    // outcome as unknown rather than claiming a durable publication.
+    await fsyncTreeDirectories(destination);
     await fsyncDirectory(resolved.parent);
+    complete = true;
 
     await session.sendControl({
       t: "result",
@@ -319,14 +330,22 @@ async function handlePush(
     const failure = error instanceof NodeWorkspaceError
       ? error
       : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
+    const partial = claimed !== undefined && !complete ? await cleanupIncomplete(claimed) : false;
+    const message = partial
+      ? `${failure.message} (an incomplete publication remains at the destination; inspect it with node_workspace_status)`
+      : failure.message;
     await session
-      .sendControl({ t: "result", ok: false, code: failure.code, message: failure.message, published: committed })
+      .sendControl({
+        t: "result",
+        ok: false,
+        code: failure.code,
+        message,
+        published: complete,
+        partial,
+      })
       .catch(() => undefined);
-    return JSON.stringify({ ok: false, code: failure.code, published: committed });
+    return JSON.stringify({ ok: false, code: failure.code, published: complete, partial });
   } finally {
-    if (staging && !committed) {
-      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    }
     session.close();
   }
 }
@@ -431,16 +450,23 @@ async function handleStatus(
   }
   let verified = false;
   let drift: string | undefined;
-  try {
-    await verifyTreeMatches(resolved.destination, marker.manifest, marker.directories);
-    verified = true;
-  } catch (error) {
-    drift = errorMessage(error);
+  if (marker.state === "incomplete") {
+    drift = "publication is incomplete";
+  } else if (marker.manifest === undefined || marker.directories === undefined) {
+    drift = "legacy marker has no manifest to verify";
+  } else {
+    try {
+      await verifyTreeMatches(resolved.destination, marker.manifest, marker.directories);
+      verified = true;
+    } catch (error) {
+      drift = errorMessage(error);
+    }
   }
   return JSON.stringify({
     exists: true,
     parentExists: true,
     owned: true,
+    complete: marker.state === "complete",
     verified,
     drift: drift ?? null,
     marker,

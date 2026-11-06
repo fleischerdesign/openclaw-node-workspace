@@ -246,7 +246,7 @@ test("transport loss after acceptance is an explicit unknown outcome, not a fail
   );
 });
 
-test("a tampered file is rejected by the node's per-file digest", async () => {
+test("a tampered file is rejected and leaves only an incomplete marker", async () => {
   const sourceRoot = await workspace({ "a.txt": "alpha" });
   const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-dest-"));
   const raw = {
@@ -272,15 +272,31 @@ test("a tampered file is rejected by the node's per-file digest", async () => {
         signal: undefined,
         progress: undefined,
       }),
-    (error: unknown) => error instanceof NodeWorkspaceError && (error.code === "integrity" || error.code === "unknown-outcome"),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "integrity",
   );
-  assert.equal(
-    await fs
-      .lstat(path.join(destinationRoot, "app"))
-      .then(() => true)
-      .catch(() => false),
-    false,
+  const marker = JSON.parse(
+    await fs.readFile(path.join(destinationRoot, "app", ".openclaw-node-workspace.json"), "utf8"),
+  ) as { state: string };
+  assert.equal(marker.state, "incomplete");
+});
+
+test("an empty destination created before the push is never replaced", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  const remotePath = path.join(destinationRoot, "app");
+  await fs.mkdir(remotePath);
+  await assert.rejects(
+    () =>
+      pushWorkspace(harness.transport, config.gateway, {
+        node: "node-1",
+        localPath: sourceRoot,
+        remotePath,
+        exclude: undefined,
+        signal: undefined,
+        progress: undefined,
+      }),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
   );
+  assert.deepEqual(await fs.readdir(remotePath), []);
 });
 
 test("a local path outside gateway.localRoots is never scanned", async () => {
@@ -375,43 +391,6 @@ test("a stale staging directory never blocks a retry or a first attempt", async 
   assert.equal(again.pushId, first.pushId);
 });
 
-test("a destination created during transfer is never renamed or deleted", async () => {
-  const { sourceRoot, destinationRoot, config, harness } = await setup({
-    "big.bin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  });
-  const remotePath = path.join(destinationRoot, "app");
-  let swapped = false;
-  const racing = {
-    ...harness.transport,
-    async openDuplex(request: Parameters<typeof harness.transport.openDuplex>[0]) {
-      const channel = await harness.transport.openDuplex(request);
-      const send = channel.send.bind(channel);
-      channel.send = async (message: Uint8Array) => {
-        if (!swapped && message[0] === 1) {
-          swapped = true;
-          await fs.mkdir(remotePath);
-          await fs.writeFile(path.join(remotePath, "precious.txt"), "not yours");
-        }
-        return send(message);
-      };
-      return channel;
-    },
-  };
-  await assert.rejects(
-    () =>
-      pushWorkspace(racing, config.gateway, {
-        node: "node-1",
-        localPath: sourceRoot,
-        remotePath,
-        exclude: undefined,
-        signal: undefined,
-        progress: undefined,
-      }),
-    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
-  );
-  assert.equal(await fs.readFile(path.join(remotePath, "precious.txt"), "utf8"), "not yours");
-});
-
 test("a root of / matches its children instead of failing on a // prefix", async () => {
   const sourceRoot = await workspace({ "a.txt": "alpha" });
   const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-root-dst-"));
@@ -486,4 +465,39 @@ test("a published-but-failed node result is an unknown outcome", async () => {
       }),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "unknown-outcome",
   );
+});
+
+test("claimDestination refuses an existing empty directory and a file", async () => {
+  const { claimDestination } = await import("../src/node/fs-atomic.js");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-claim-"));
+  const empty = path.join(root, "empty");
+  await fs.mkdir(empty);
+  await assert.rejects(
+    () => claimDestination(empty),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
+  );
+  assert.deepEqual(await fs.readdir(empty), []);
+
+  const file = path.join(root, "file");
+  await fs.writeFile(file, "keep");
+  await assert.rejects(
+    () => claimDestination(file),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
+  );
+  assert.equal(await fs.readFile(file, "utf8"), "keep");
+});
+
+test("a stale staging directory does not block a first publish", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  await fs.mkdir(path.join(destinationRoot, ".app.nodews-deadbeef"));
+  const outcome = await pushWorkspace(harness.transport, config.gateway, {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "app"),
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  });
+  assert.equal(outcome.status, "published");
+  assert.equal(await fs.readFile(path.join(outcome.cwd, "a.txt"), "utf8"), "alpha");
 });

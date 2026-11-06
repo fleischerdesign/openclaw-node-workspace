@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
 import type { GatewayConfig } from "../config.js";
-import { NodeWorkspaceError, errorMessage } from "../errors.js";
+import { NodeWorkspaceError } from "../errors.js";
 import type { NodeTransport } from "../transport.js";
 import { fetchArtifact } from "./artifact.js";
 import { pushWorkspace, type PushProgress } from "./push.js";
@@ -32,12 +32,36 @@ function requireConfig(deps: ToolDependencies): GatewayConfig {
   return deps.config;
 }
 
-export function formatToolError(error: unknown): string {
-  if (error instanceof NodeWorkspaceError) {
-    if (error.code === "unknown-outcome") return `UNKNOWN OUTCOME — do not retry blindly. ${error.message}`;
-    return `${error.code}: ${error.message}`;
+export interface ToolFailure {
+  content: { type: "text"; text: string }[];
+  details: Record<string, unknown>;
+}
+
+/**
+ * Return a coded failure as an ordinary tool result.
+ *
+ * OpenClaw's tools.invoke boundary turns a thrown plugin error into a generic
+ * internal_error, which hides unknown-outcome and every other code from the
+ * agent. A structured details object preserves the outcome the caller needs.
+ */
+export function toolFailure(tool: string, error: unknown): ToolFailure {
+  if (!(error instanceof NodeWorkspaceError)) throw error;
+  const unknown = error.code === "unknown-outcome";
+  const details: Record<string, unknown> = {
+    ok: false,
+    code: error.code,
+    message: error.message,
+    unknownOutcome: unknown,
+  };
+  for (const key of ["pushId", "nodeId", "remotePath", "partial"] as const) {
+    const value = error.details[key];
+    if (typeof value === "string" || typeof value === "boolean") details[key] = value;
   }
-  return errorMessage(error);
+  const prefix = unknown ? "UNKNOWN OUTCOME — do not retry blindly" : "failed";
+  return {
+    content: [{ type: "text", text: `${tool} ${prefix} [${error.code}]: ${error.message}` }],
+    details,
+  };
 }
 
 function progressText(progress: PushProgress): string {
@@ -131,7 +155,7 @@ const pushParameters = Type.Object(
   { additionalProperties: false },
 );
 
-const pushDetails = Type.Object(
+const pushSuccess = Type.Object(
   {
     ok: Type.Literal(true),
     status: Type.Union([Type.Literal("published"), Type.Literal("already-applied")]),
@@ -144,6 +168,30 @@ const pushDetails = Type.Object(
     durationMs: Type.Number(),
     skipped: Type.Number(),
     skippedPaths: Type.Array(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+const failureShape = {
+  ok: Type.Literal(false),
+  code: Type.String(),
+  message: Type.String(),
+  unknownOutcome: Type.Boolean(),
+  pushId: Type.Optional(Type.String()),
+  nodeId: Type.Optional(Type.String()),
+  remotePath: Type.Optional(Type.String()),
+  partial: Type.Optional(Type.Boolean()),
+} as const;
+
+const pushFailure = Type.Object(failureShape, { additionalProperties: false });
+const pushDetails = Type.Union([pushSuccess, pushFailure]);
+
+const artifactFailure = Type.Object(
+  {
+    ok: Type.Literal(false),
+    code: Type.String(),
+    message: Type.String(),
+    unknownOutcome: Type.Boolean(),
   },
   { additionalProperties: false },
 );
@@ -193,18 +241,21 @@ const markerSchema = Type.Object(
     files: Type.Number(),
     bytes: Type.Number(),
     createdAt: Type.String(),
-    manifest: Type.Array(
-      Type.Object(
-        {
-          path: Type.String(),
-          size: Type.Number(),
-          sha256: Type.String(),
-          executable: Type.Boolean(),
-        },
-        { additionalProperties: false },
+    state: Type.Union([Type.Literal("complete"), Type.Literal("incomplete"), Type.Literal("legacy")]),
+    manifest: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            path: Type.String(),
+            size: Type.Number(),
+            sha256: Type.String(),
+            executable: Type.Boolean(),
+          },
+          { additionalProperties: false },
+        ),
       ),
     ),
-    directories: Type.Array(Type.String()),
+    directories: Type.Optional(Type.Array(Type.String())),
   },
   { additionalProperties: false },
 );
@@ -217,6 +268,7 @@ const statusDetails = Type.Object(
     exists: Type.Boolean(),
     parentExists: Type.Boolean(),
     owned: Type.Boolean(),
+    complete: Type.Boolean(),
     verified: Type.Boolean(),
     drift: Type.Union([Type.String(), Type.Null()]),
     marker: Type.Union([markerSchema, Type.Null()]),
@@ -233,14 +285,14 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       label: "Publish a workspace to a node",
       description:
         "Publish one explicitly selected local directory to a paired node over the OpenClaw node channel. " +
-        "This is one-way (Gateway to node), verifies every file by SHA-256, and publishes atomically. " +
+        "This is one-way (Gateway to node), verifies every file by SHA-256, and claims a new destination with mkdir(2) before writing. " +
         "It does not run commands: the result returns the node id and remote cwd so you can invoke the native exec tool with host=node yourself. " +
         "The destination must be new. An existing directory with the same content is reported as already-applied only after its bytes are re-verified; a different directory is a conflict and is never replaced.",
       parameters: pushParameters,
       outputSchema: pushDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
-        const config = requireConfig(deps);
         try {
+          const config = requireConfig(deps);
           const input = parsePushParams(params);
           const outcome = await pushWorkspace(deps.transport, config, {
             node: input.node,
@@ -296,7 +348,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
-          throw new Error(formatToolError(error), { cause: error });
+          return toolFailure("node_workspace_push", error);
         }
       },
     },
@@ -308,10 +360,10 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         "The bytes are verified against the node's SHA-256 before publication and the destination is created exclusively: " +
         "an existing file is never overwritten.",
       parameters: artifactParameters,
-      outputSchema: artifactDetails,
+      outputSchema: Type.Union([artifactDetails, artifactFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
-        const config = requireConfig(deps);
         try {
+          const config = requireConfig(deps);
           const input = parseArtifactParams(params);
           const outcome = await fetchArtifact(deps.transport, config, {
             node: input.node,
@@ -351,7 +403,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
-          throw new Error(formatToolError(error), { cause: error });
+          return toolFailure("node_workspace_artifact", error);
         }
       },
     },
@@ -362,10 +414,10 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         "Read-only: report whether a node destination exists and whether it was published by this plugin, including its push id and tree digest. " +
         "Use this after an unknown outcome before retrying anything.",
       parameters: statusParameters,
-      outputSchema: statusDetails,
+      outputSchema: Type.Union([statusDetails, artifactFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
-        const config = requireConfig(deps);
         try {
+          const config = requireConfig(deps);
           const input = parseStatusParams(params);
           const outcome: StatusOutcome = await workspaceStatus(deps.transport, config, {
             node: input.node,
@@ -388,13 +440,14 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               exists: outcome.exists,
               parentExists: outcome.parentExists,
               owned: outcome.owned,
+              complete: outcome.complete,
               verified: outcome.verified,
               drift: outcome.drift,
               marker: outcome.marker,
             },
           };
         } catch (error) {
-          throw new Error(formatToolError(error), { cause: error });
+          return toolFailure("node_workspace_status", error);
         }
       },
     },

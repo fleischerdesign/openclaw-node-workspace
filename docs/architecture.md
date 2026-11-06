@@ -20,7 +20,7 @@ Gateway tool ──► policy + allowlist ──► openDuplex("nodews.push")
   │                                             │
   │  framed duplex (control + file chunks)      │
   ▼                                             ▼
-node command "nodews.push" ──► staging dir ──► verify ──► rename ──► destination
+node command "nodews.push" ──► mkdir claim ──► write+verify ──► finalize marker ──► destination
                                                               │
 agent ◄── nodeId + cwd + digest ──────────────────────────────┘
   │
@@ -42,7 +42,7 @@ the native `exec` tool, which retains its own approvals and node allowlists.
 | `src/frames.ts` | Binary frame codec (one control byte + JSON or file bytes). |
 | `src/transport.ts` | `FrameSession`: ordered frame queue, timeouts, closure semantics. |
 | `src/gateway/*` | Tool definitions, push/artifact/status engines, runtime adapter. |
-| `src/node/*` | Node command handlers and atomic filesystem helpers. |
+| `src/node/*` | Node command handlers and no-clobber filesystem helpers. |
 
 The commands declare `hasActiveWork: () => false` because all work is confined to `handle()`. The
 node host separately tracks in-flight invocations, so this does not claim idleness while a call is
@@ -70,21 +70,23 @@ protocol rather than an archive:
    Same content to the same destination is idempotent; different content is not.
 3. **Open the channel.** `openDuplex` with `nodews.push`, an idempotency key equal to the push id,
    the configured timeout, and the caller's abort signal.
-4. **Negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes, and digest.
-   The node validates protocol version 2, every path, limits, destination parent, and that the
-   destination is absent before accepting. A rejection is a coded `rejected` frame.
+4. **Claim and negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes,
+   and digest. The node validates protocol version 2, every path, limits, and the destination
+   parent. It then claims the destination with `mkdir(2)`: an existing file, symlink, or directory
+   (including an empty one) makes that call fail with `EEXIST`, so nothing is ever replaced. Only
+   after the claim does it write an `incomplete` marker and accept.
 5. **Transfer.** For each file the Gateway sends a `file` header and then exactly `size` bytes in
-   `chunkBytes` chunks. The node writes into a private staging directory and acknowledges each file
-   with `file-ok` only after the digest matches.
-6. **Verify and publish.** On `end` the node checks that every manifest file arrived, re-hashes the
-   staged files from disk, recomputes the tree digest, writes the marker, fsyncs every directory in
-   the staging tree, and renames the staging directory into place. Publication is a single rename
-   that fails if the destination appeared in the meantime.
+   `chunkBytes` chunks. The node writes directly into the claimed directory, creating files with
+   `O_EXCL`/`wx`, and acknowledges each file only after its digest matches.
+6. **Verify and finalize.** On `end` the node checks that every manifest file arrived, re-hashes the
+   tree from disk, recomputes the tree digest, atomically replaces the marker with
+   `state: "complete"`, fsyncs every directory, and only then acknowledges success.
 7. **Confirm.** The node fsyncs the destination parent, then sends `result` with the digest, file
    count, and byte count. The Gateway compares these against what it scanned before returning.
 
-Publication is a single `rename` on the same filesystem. A reader sees either no destination or the
-complete tree, never a partial copy.
+The destination name is never renamed over: `mkdir(2)` is the no-clobber primitive. The trade-off
+is visibility: the claimed directory appears before its files finish arriving. A reader can see an
+incomplete publication; the marker's `state` and `node_workspace_status` make that explicit.
 
 ## Artifact lifecycle
 
@@ -112,14 +114,17 @@ Every published directory contains `.openclaw-node-workspace.json`:
   "files": 42,
   "bytes": 1912345,
   "createdAt": "2026-11-06T19:00:00.000Z",
+  "state": "complete",
   "manifest": [{ "path": "a.txt", "size": 5, "sha256": "…", "executable": false }],
   "directories": []
 }
 ```
 
-The marker records ownership and the manifest of the published tree. Status re-hashes the directory
-against that manifest and reports `verified` or the drift reason; a matching marker alone is never
-reported as success. The marker name is reserved in manifests, so a user file cannot impersonate it.
+The marker records ownership, lifecycle state, and the manifest of the published tree. It is written
+as `incomplete` at claim time and atomically replaced with `complete` at the end. Status re-hashes
+the directory against the manifest and reports `complete`, `verified`, or the drift reason; a
+matching marker alone is never reported as success. Legacy markers without a state or manifest are
+reported as owned but unverifiable. The marker name is reserved in manifests.
 
 The marker is not a signature. Anyone who can write the node destination can edit both the files and
 the marker. Verification detects accidental drift and stale copies; it does not defend a Gateway

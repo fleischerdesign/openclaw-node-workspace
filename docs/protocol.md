@@ -32,16 +32,18 @@ than buffered without bound.
 | `file-error` | N→G | `path`, `code`, `message` |
 | `end` | G→N | — |
 | `result` (ok) | N→G | `pushId`, `digest`, `files`, `bytes` |
-| `result` (error) | N→G | `code`, `message`, `published` |
+| `result` (error) | N→G | `code`, `message`, `published`, `partial` |
 
 Manifest entries are `{ path, size, sha256, executable }`, where `path` is relative POSIX, `sha256`
 is lowercase hex, and `executable` records whether any owner execute bit was set. Directories are
 relative POSIX paths and include empty directories.
 
-The node stages into a unique `.name.nodews-<pushId>-<suffix>` directory, so a leftover staging
-directory from a crash never blocks a later attempt and is never treated as a destination. Files are
-sent in manifest order. The node enforces that order, so an out-of-order or duplicated
-`file` header is a protocol error. The Gateway waits for `file-ok` before sending the next header.
+Before `accepted`, the node claims the destination with `mkdir(2)`, writes an `incomplete` marker,
+and only then accepts. An existing file, symlink, or directory (including an empty directory)
+fails the claim with `EEXIST`; the node never renames over a destination. Files are sent in manifest
+order. The node enforces that order, so an out-of-order or duplicated `file` header is a protocol
+error. The Gateway waits for `file-ok` before sending the next header. The destination is visible
+while files arrive; the marker state distinguishes incomplete from complete.
 
 ### Validation on the node
 
@@ -55,7 +57,7 @@ Before accepting, the node independently checks:
   `totalBytes` equals the manifest sum;
 - `remotePath` is normalized and absolute, its parent exists, is a real directory, and resolves
   inside a configured `node.pushRoots` entry;
-- the destination is absent, or it already has this plugin's marker for the same push id and digest
+- the destination is absent (the node will claim it), or it already has a complete marker for the same push id and digest
   and every byte re-hashes to the manifest. Different content is never replaced.
 
 Nothing is written before these checks pass.
@@ -92,7 +94,8 @@ requires the announced size, and compares the digest. The destination appears on
 ## Status
 
 `nodews.status` is a unary command. Parameters: `{ remotePath }`. Response: a JSON string with
-`exists`, `parentExists`, and for a directory `owned` plus `marker` (or `null`).
+`exists`, `parentExists`, and for a directory `owned`, `complete`, `verified`, `drift`, and `marker`
+(or `null`).
 
 ## Limits and timeouts
 
@@ -109,7 +112,8 @@ requires the announced size, and compares the digest. The destination appears on
 | Per-frame wait | min(120 s, remaining deadline) | Gateway and node |
 | Node operation | 300 s absolute | node |
 
-A timeout before `accepted` means nothing was published. A timeout after `accepted` is reported as
+A timeout before `accepted` means nothing was published; a claim that failed mid-write is cleaned
+up when it is empty or contains only the incomplete marker. A timeout after `accepted` is reported as
 `unknown-outcome`; see [Operations](operations.md).
 
 ## Compatibility

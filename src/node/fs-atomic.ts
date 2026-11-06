@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -133,6 +133,8 @@ export async function resolveArtifactSource(
   return real;
 }
 
+export type MarkerState = "complete" | "incomplete" | "legacy";
+
 export interface Marker {
   readonly plugin: "node-workspace";
   readonly protocol: 1;
@@ -141,8 +143,10 @@ export interface Marker {
   readonly files: number;
   readonly bytes: number;
   readonly createdAt: string;
-  readonly manifest: readonly ManifestEntry[];
-  readonly directories: readonly string[];
+  /** Absent on markers written before the state field existed: legacy. */
+  readonly state: MarkerState;
+  readonly manifest?: readonly ManifestEntry[];
+  readonly directories?: readonly string[];
 }
 
 const MAX_MARKER_BYTES = 4 * 1024 * 1024;
@@ -163,12 +167,19 @@ export async function readMarker(destination: string): Promise<Marker | undefine
       typeof value.files !== "number" ||
       typeof value.bytes !== "number" ||
       typeof value.createdAt !== "string" ||
-      !Array.isArray(value.manifest) ||
-      !Array.isArray(value.directories)
+      (value.manifest !== undefined && !Array.isArray(value.manifest)) ||
+      (value.directories !== undefined && !Array.isArray(value.directories))
     ) {
       return undefined;
     }
-    return value as Marker;
+    const state =
+      value.state === "complete" || value.state === "incomplete"
+        ? value.state
+        : value.state === undefined
+          ? "legacy"
+          : undefined;
+    if (!state) return undefined;
+    return { ...(value as Marker), state };
   } catch {
     return undefined;
   }
@@ -185,13 +196,16 @@ export async function markerMatches(
 
 export async function writeMarker(directory: string, marker: Marker): Promise<void> {
   const target = path.join(directory, MARKER_FILE);
-  const handle = await fs.open(target, "wx", 0o600);
+  const temp = path.join(directory, `.openclaw-node-workspace.tmp-${randomUUID()}`);
+  const handle = await fs.open(temp, "wx", 0o600);
   try {
     await handle.writeFile(`${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8" });
     await handle.sync();
   } finally {
     await handle.close();
   }
+  await fs.rename(temp, target);
+  await fsyncDirectory(directory);
 }
 
 /** Re-hash every staged file so the published bytes, not only the wire bytes, are verified. */
@@ -304,4 +318,48 @@ export async function fsyncDirectory(directory: string): Promise<void> {
 /** Local artifact mode never inherits group/other bits from the node. */
 export function safeArtifactMode(remoteMode: number): number {
   return (remoteMode & 0o111) !== 0 ? 0o700 : 0o600;
+}
+
+/**
+ * Atomically claim a destination name without ever replacing it.
+ *
+ * mkdir(2) is the no-clobber primitive available on every supported POSIX
+ * host: it fails with EEXIST for an existing file, symlink, or directory,
+ * including an empty directory (which rename(2) would otherwise replace).
+ */
+export async function claimDestination(destination: string): Promise<void> {
+  try {
+    await fs.mkdir(destination, { mode: 0o700 });
+  } catch (error) {
+    if (isErrno(error, "EEXIST")) {
+      throw new NodeWorkspaceError("destination-exists", "destination already exists; it is never replaced");
+    }
+    throw new NodeWorkspaceError("io", `cannot claim destination: ${errorMessage(error)}`, {}, { cause: error });
+  }
+}
+
+/**
+ * Remove a claimed destination only when it is empty or contains exactly our
+ * incomplete marker. Anything else is left in place: the plugin never deletes
+ * a tree it cannot prove it owns.
+ */
+export async function cleanupIncomplete(destination: string): Promise<boolean> {
+  try {
+    const entries = await fs.readdir(destination);
+    if (entries.length === 0) {
+      await fs.rmdir(destination);
+      return false;
+    }
+    if (entries.length === 1 && entries[0] === MARKER_FILE) {
+      const marker = await readMarker(destination);
+      if (marker?.state === "incomplete") {
+        await fs.unlink(path.join(destination, MARKER_FILE));
+        await fs.rmdir(destination);
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return true;
+  }
 }

@@ -6,9 +6,10 @@
   only inside `gateway.artifactRoots`; a node push creates only below `node.pushRoots`; a node
   artifact reads only inside `node.artifactRoots`. Roots are resolved with `realpath`; an empty list
   denies the operation.
-- **Destinations are new.** A push refuses every existing destination. A marker only allows an
-  `already-applied` answer after the node re-hashes every file against the incoming manifest; it
-  never authorizes a rename, overwrite, or delete.
+- **Destinations are new by an atomic claim.** The node claims the name with `mkdir(2)`, which
+  fails for an existing file, symlink, or directory, including an empty directory that `rename(2)`
+  would have replaced. A marker only allows an `already-applied` answer after the node re-hashes
+  every file against the incoming manifest; it never authorizes a rename, overwrite, or delete.
 - **No link following.** Symlinks in a selected workspace are rejected or skipped, never followed.
   A symlink at the node's destination or at any artifact path is rejected. A symlinked destination
   parent is rejected before resolution.
@@ -47,8 +48,12 @@
 - **No preservation of ownership, ACLs, xattrs, hard links, or timestamps.** Only content and the
   executable bit are reproduced.
 - **No protection against a hostile root.** If `pushRoots` contains a directory that an untrusted
-  local user can replace with a symlink between the check and the rename, local filesystem security
+  local user can replace with a symlink between the parent realpath check and the `mkdir` claim, local filesystem security
   is already lost. Configure roots under directories only the node's service account controls.
+- **An incomplete publication is visible.** The destination appears before all files arrive and is
+  marked `state: "incomplete"`. Consumers must not read it until the tool returns success or
+  `node_workspace_status` reports `complete: true, verified: true`. The plugin does not hide a
+  partial tree behind an atomic rename.
 - **No Windows support.** The path rules and publication model are POSIX. A Windows node is not a
   supported target, and the command's `isAvailable` is not used to claim otherwise.
 - **No deletion at all.** The plugin never removes a published directory or a file inside it;
@@ -65,6 +70,8 @@
 | Symlinked push destination or parent | `symlink-rejected`. |
 | Destination parent outside `pushRoots` | `path-outside-root`. |
 | Destination exists, no marker | `destination-exists`; the directory is untouched. |
+| Existing empty directory at the destination | `mkdir(2)` fails `EEXIST`; the directory stays empty. |
+| Existing file at the destination | `mkdir(2)` fails `EEXIST`; the file is untouched. |
 | Marker with wrong push id or digest | `destination-exists`; the directory is untouched. |
 | Marker matches but a file changed | `destination-drifted`; the directory is untouched. |
 | File created at the destination during transfer | Rename fails `destination-exists`; the new directory is untouched. |

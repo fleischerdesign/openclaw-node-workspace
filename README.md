@@ -4,14 +4,18 @@ An OpenClaw plugin that publishes **one explicitly selected directory** from a G
 node, and fetches **one explicitly selected artifact** back. It uses the public OpenClaw plugin SDK
 and the existing node channel: no SSH, no rsync, no remote shell, and no second transport to secure.
 
-The plugin is deliberately not a sync engine. A push is a verified, atomic one-way copy. Changes made
-after it are not propagated, and nothing on the node is ever deleted implicitly.
+The plugin is deliberately not a sync engine. A push is a verified, no-clobber one-way copy. The
+destination name is claimed with `mkdir(2)` before any file is written, so an existing file or even
+an empty directory can never be replaced. The destination becomes visible while files are still
+arriving; `node_workspace_status` reports `complete: false` until the marker is finalized.
+
+Changes made after it are not propagated, and nothing on the node is ever deleted implicitly.
 
 ## What it does
 
 | Tool | Effect |
 | --- | --- |
-| `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and publishes it atomically on the node. Returns the canonical node id and the remote `cwd`. |
+| `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and claims a new destination with `mkdir(2)` before writing. Returns the canonical node id and the remote `cwd`. |
 | `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
 | `node_workspace_status` | Read-only check of a node destination: present or absent, whether this plugin published it, and whether the bytes still match the published manifest. |
 
@@ -166,8 +170,10 @@ The destination must not exist. The bytes are verified before they are published
 
 ## Failure semantics
 
-An error carries a code in its message. The important distinction is whether the effect may have
-happened.
+A failed tool returns a structured result instead of throwing: `details.ok` is `false`, with
+`code`, `message`, and `unknownOutcome`; the model-visible text also names the code. This survives
+the Gateway `tools.invoke` boundary, which would otherwise flatten a thrown error into
+`internal_error`. The important distinction is whether the effect may have happened.
 
 | Code | Meaning |
 | --- | --- |
@@ -181,7 +187,7 @@ happened.
 | `protocol` | A frame was malformed or out of order. The operation failed; nothing was published. |
 | `integrity` | A digest or byte count disagreed. Treat the copy as invalid. |
 | `transport`, `timeout`, `canceled` | The channel failed **before** the node accepted the push; no effect. |
-| `unknown-outcome` | The channel failed **after** the node accepted the push. The plugin cannot prove whether publication happened. |
+| `unknown-outcome` | The channel failed **after** the node claimed the destination. The plugin cannot prove whether publication completed. |
 | `conflict` | A node name matches more than one paired node; use a node id. |
 
 `unknown-outcome` never claims failure. Do not retry it blindly: call `node_workspace_status` with

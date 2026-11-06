@@ -102,13 +102,32 @@ test("the registered push tool publishes through the injected runtime and return
   assert.match(result.content[0]?.text ?? "", /host=node/);
   assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "alpha");
 
-  await assert.rejects(
-    () => pushTool.execute("bad-1", { node: "", localPath: source, remotePath }),
-    /path-invalid/,
+  for (const args of [
+    { node: "", localPath: source, remotePath },
+    { node: "node-1", localPath: 5, remotePath },
+    null,
+  ]) {
+    const bad = await pushTool.execute("bad", args);
+    assert.equal(bad.details.ok, false);
+    assert.equal(bad.details.code, "path-invalid");
+    assert.match(bad.content[0]?.text ?? "", /path-invalid/);
+  }
+});
+
+test("toolFailure preserves unknown-outcome as an actionable tool result", async () => {
+  const { toolFailure } = await import("../src/gateway/tools.js");
+  const { NodeWorkspaceError } = await import("../src/errors.js");
+  const result = toolFailure(
+    "node_workspace_push",
+    new NodeWorkspaceError("unknown-outcome", "transport died", {
+      pushId: "abc",
+      nodeId: "node-1",
+      remotePath: "/srv/app",
+    }),
   );
-  await assert.rejects(
-    () => pushTool.execute("bad-2", { node: "node-1", localPath: 5, remotePath }),
-    /path-invalid/,
-  );
-  await assert.rejects(() => pushTool.execute("bad-3", null), /path-invalid/);
+  assert.equal(result.details.ok, false);
+  assert.equal(result.details.code, "unknown-outcome");
+  assert.equal(result.details.unknownOutcome, true);
+  assert.equal(result.details.pushId, "abc");
+  assert.match(result.content[0]?.text ?? "", /UNKNOWN OUTCOME/);
 });
