@@ -44,6 +44,10 @@ the native `exec` tool, which retains its own approvals and node allowlists.
 | `src/gateway/*` | Tool definitions, push/artifact/status engines, runtime adapter. |
 | `src/node/*` | Node command handlers and atomic filesystem helpers. |
 
+The commands declare `hasActiveWork: () => false` because all work is confined to `handle()`. The
+node host separately tracks in-flight invocations, so this does not claim idleness while a call is
+running; it only states that no background job survives the handler.
+
 ## Why a framed duplex command
 
 A single JSON `nodes.invoke` payload would have to carry the whole workspace inline and is bounded by
@@ -67,17 +71,17 @@ protocol rather than an archive:
 3. **Open the channel.** `openDuplex` with `nodews.push`, an idempotency key equal to the push id,
    the configured timeout, and the caller's abort signal.
 4. **Negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes, and digest.
-   The node validates the protocol version, every path, limits, destination parent, and replace
-   eligibility before accepting. A rejection is a coded `rejected` frame.
+   The node validates protocol version 2, every path, limits, destination parent, and that the
+   destination is absent before accepting. A rejection is a coded `rejected` frame.
 5. **Transfer.** For each file the Gateway sends a `file` header and then exactly `size` bytes in
    `chunkBytes` chunks. The node writes into a private staging directory and acknowledges each file
    with `file-ok` only after the digest matches.
 6. **Verify and publish.** On `end` the node checks that every manifest file arrived, re-hashes the
-   staged files from disk, recomputes the tree digest, writes the marker, fsyncs, and renames the
-   staging directory into place. For a replacement it renames the old directory aside first and
-   restores it if the swap fails.
-7. **Confirm.** The node sends `result` with the digest, file count, byte count, and whether it
-   replaced a previous copy. The Gateway compares these against what it scanned before returning.
+   staged files from disk, recomputes the tree digest, writes the marker, fsyncs every directory in
+   the staging tree, and renames the staging directory into place. Publication is a single rename
+   that fails if the destination appeared in the meantime.
+7. **Confirm.** The node fsyncs the destination parent, then sends `result` with the digest, file
+   count, and byte count. The Gateway compares these against what it scanned before returning.
 
 Publication is a single `rename` on the same filesystem. A reader sees either no destination or the
 complete tree, never a partial copy.
@@ -107,23 +111,25 @@ Every published directory contains `.openclaw-node-workspace.json`:
   "digest": "…",
   "files": 42,
   "bytes": 1912345,
-  "createdAt": "2026-11-06T19:00:00.000Z"
+  "createdAt": "2026-11-06T19:00:00.000Z",
+  "manifest": [{ "path": "a.txt", "size": 5, "sha256": "…", "executable": false }],
+  "directories": []
 }
 ```
 
-The marker is how a later `replace=true` proves the directory belongs to this plugin, and how status
-reports ownership. A directory without a valid marker is never replaced or deleted. The marker name
-is reserved in manifests, so a user file cannot impersonate it.
+The marker records ownership and the manifest of the published tree. Status re-hashes the directory
+against that manifest and reports `verified` or the drift reason; a matching marker alone is never
+reported as success. The marker name is reserved in manifests, so a user file cannot impersonate it.
 
-The marker is not a signature. Anyone who can write the node destination can create one; the security
-model treats the node as an endpoint, not as an untrusted peer defending against its own operator.
+The marker is not a signature. Anyone who can write the node destination can edit both the files and
+the marker. Verification detects accidental drift and stale copies; it does not defend a Gateway
+against a node operator who deliberately fabricates a consistent tree.
 
 ## What is deliberately absent
 
 - No incremental transfer or delta protocol. Every push sends the selected tree.
-- No delete propagation. Removing a file on the Gateway and pushing again with `replace=true` yields
-  a destination that matches the new scan; that is the only deletion-like operation, and it replaces
-  the whole owned directory.
+- No replace and no delete. A destination must be new; updating means publishing to a new path and
+  retiring the old one yourself. This removes the destructive swap window entirely.
 - No Rust sidecar or native helper. The plugin runs inside Node on both sides, and a second toolchain
   would add build and packaging surface without changing a filesystem operation that Node already
   performs.

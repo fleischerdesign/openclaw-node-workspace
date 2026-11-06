@@ -17,6 +17,7 @@ mkdir -p "$PROFILE/state" "$PROFILE/home"
 TARBALL="$WORK/plugin.tgz"
 
 cd "$ROOT"
+npm run build >/dev/null
 npm pack --pack-destination "$WORK" >/dev/null
 TARBALL="$(ls "$WORK"/*.tgz)"
 

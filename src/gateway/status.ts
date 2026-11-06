@@ -11,6 +11,8 @@ export interface StatusOutcome {
   readonly exists: boolean;
   readonly parentExists: boolean;
   readonly owned: boolean;
+  readonly verified: boolean;
+  readonly drift: string | null;
   readonly marker: Marker | null;
 }
 
@@ -43,7 +45,26 @@ export async function workspaceStatus(
       throw new NodeWorkspaceError("protocol", "node status response is not valid JSON");
     }
   } else if (typeof raw === "object" && raw !== null) {
-    value = raw as Record<string, unknown>;
+    const envelope = raw as Record<string, unknown>;
+    // The Gateway runtime may return the command result directly, its JSON
+    // payload, or the full node-invoke envelope. Accept exactly those shapes.
+    if (typeof envelope.payloadJSON === "string") {
+      try {
+        value = JSON.parse(envelope.payloadJSON) as Record<string, unknown>;
+      } catch {
+        throw new NodeWorkspaceError("protocol", "node status payloadJSON is not valid JSON");
+      }
+    } else if (typeof envelope.payload === "string") {
+      try {
+        value = JSON.parse(envelope.payload) as Record<string, unknown>;
+      } catch {
+        throw new NodeWorkspaceError("protocol", "node status payload is not valid JSON");
+      }
+    } else if (typeof envelope.payload === "object" && envelope.payload !== null) {
+      value = envelope.payload as Record<string, unknown>;
+    } else {
+      value = envelope;
+    }
   } else {
     throw new NodeWorkspaceError("protocol", "node status response has an unexpected shape");
   }
@@ -57,6 +78,8 @@ export async function workspaceStatus(
     exists: value.exists,
     parentExists: value.parentExists === true,
     owned: value.owned === true,
+    verified: value.verified === true,
+    drift: typeof value.drift === "string" ? value.drift : null,
     marker,
   };
 }

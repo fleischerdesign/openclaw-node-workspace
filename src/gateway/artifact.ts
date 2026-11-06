@@ -6,8 +6,9 @@ import path from "node:path";
 
 import type { GatewayConfig } from "../config.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
-import { normalizeAbsolutePosixPath } from "../paths.js";
+import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_FETCH } from "../protocol.js";
+import { fsyncDirectory, safeArtifactMode } from "../node/fs-atomic.js";
 import {
   assertControlFrame,
   controlType,
@@ -69,7 +70,7 @@ async function resolveLocalDestination(
       // A configured root that does not exist grants nothing.
     }
   }
-  const match = roots.find((root) => parent === root || parent.startsWith(`${root}/`));
+  const match = roots.find((root) => isWithin(root, parent));
   if (match === undefined) {
     throw new NodeWorkspaceError(
       "path-outside-root",
@@ -125,6 +126,12 @@ export async function fetchArtifact(
   if (input.signal?.aborted) throw new NodeWorkspaceError("canceled", "the fetch was canceled");
 
   const temp = path.posix.join(local.parent, `.${path.basename(local.destination)}.nodews-part-${randomUUID()}`);
+  const deadline = Date.now() + config.timeoutMs;
+  const remaining = (): number => {
+    const left = deadline - Date.now();
+    if (left <= 0) throw new NodeWorkspaceError("timeout", "the artifact fetch exceeded its time limit");
+    return left;
+  };
   let session: FrameSession | undefined;
   let tempHandle: FileHandle | undefined;
   try {
@@ -139,7 +146,7 @@ export async function fetchArtifact(
 
     const metaValue = await (async (): Promise<Record<string, unknown>> => {
       for (;;) {
-        const frame = await session.next(config.timeoutMs);
+        const frame = await session.next(remaining());
         if (frame.kind === "data") {
           throw new NodeWorkspaceError("protocol", "the node sent artifact bytes before metadata");
         }
@@ -165,7 +172,7 @@ export async function fetchArtifact(
     if (size > config.maxArtifactBytes) {
       throw new NodeWorkspaceError("limit-exceeded", `artifact exceeds the configured ${config.maxArtifactBytes} bytes`);
     }
-    const mode = typeof metaValue.mode === "number" ? metaValue.mode & 0o777 : 0o644;
+    const mode = safeArtifactMode(typeof metaValue.mode === "number" ? metaValue.mode : 0o600);
     tempHandle = await fs.open(temp, "wx", 0o600);
     const hash = createHash("sha256");
     let received = 0;
@@ -173,7 +180,7 @@ export async function fetchArtifact(
 
     while (!done) {
       if (input.signal?.aborted) throw new NodeWorkspaceError("canceled", "the fetch was canceled");
-      const frame = await session.next(config.timeoutMs);
+      const frame = await session.next(remaining());
       if (frame.kind === "data") {
         if (received + frame.data.byteLength > size) {
           throw new NodeWorkspaceError("protocol", "the node sent more bytes than it announced");
@@ -211,7 +218,21 @@ export async function fetchArtifact(
     tempHandle = undefined;
 
     await publishExclusive(temp, local.destination);
-    await fs.chmod(local.destination, mode).catch(() => undefined);
+    try {
+      await fsyncDirectory(local.parent);
+    } catch (error) {
+      await fs.rm(local.destination, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    // Publication starts at 0600 through the exclusive temp file; only the
+    // executable bit may widen it, and only for the owner.
+    let appliedMode = 0o600;
+    try {
+      await fs.chmod(local.destination, mode);
+      appliedMode = mode;
+    } catch {
+      // Keep the safe 0600 default; report what was actually applied.
+    }
     await fs.rm(temp, { force: true }).catch(() => undefined);
 
     return {
@@ -219,7 +240,7 @@ export async function fetchArtifact(
       localPath: local.destination,
       sha256: digest,
       bytes: received,
-      mode,
+      mode: appliedMode,
     };
   } catch (error) {
     if (error instanceof NodeWorkspaceError && error.code === "canceled") throw error;

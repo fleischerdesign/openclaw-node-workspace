@@ -1,17 +1,16 @@
 import type { ManifestEntry } from "./digest.js";
 import { NodeWorkspaceError } from "./errors.js";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const COMMAND_PUSH = "nodews.push";
 export const COMMAND_FETCH = "nodews.fetch";
 export const COMMAND_STATUS = "nodews.status";
 
 export interface PushHello {
   readonly t: "hello";
-  readonly protocol: 1;
+  readonly protocol: 2;
   readonly pushId: string;
   readonly remotePath: string;
-  readonly replace: boolean;
   readonly totalBytes: number;
   readonly treeDigest: string;
   readonly manifest: readonly ManifestEntry[];
@@ -38,7 +37,6 @@ export type NodeControl =
       readonly digest: string;
       readonly files: number;
       readonly bytes: number;
-      readonly replaced: boolean;
     }
   | {
       readonly t: "result";
@@ -107,7 +105,6 @@ export function parsePushHello(value: unknown): PushHello {
     protocol: PROTOCOL_VERSION,
     pushId: requireString(value.pushId, "hello.pushId"),
     remotePath: requireString(value.remotePath, "hello.remotePath"),
-    replace: requireBoolean(value.replace, "hello.replace"),
     totalBytes: requireSafeInteger(value.totalBytes, "hello.totalBytes"),
     treeDigest: requireString(value.treeDigest, "hello.treeDigest"),
     manifest: value.manifest.map(parseManifestEntry),

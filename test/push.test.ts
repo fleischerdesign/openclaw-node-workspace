@@ -60,7 +60,6 @@ test("push publishes a verified one-way copy and reports the remote cwd", async 
     node: "Node One",
     localPath: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
-    replace: false,
     exclude: undefined,
     signal: undefined,
     progress: (entry) => progress.push(entry),
@@ -92,7 +91,6 @@ test("published modes are owner-only, with the executable bit preserved", async 
     node: "node-1",
     localPath: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
-    replace: false,
     exclude: undefined,
     signal: undefined,
     progress: undefined,
@@ -109,7 +107,6 @@ test("a repeated identical push is reported as already applied", async () => {
     node: "node-1",
     localPath: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
-    replace: false,
     exclude: undefined,
     signal: undefined,
     progress: undefined,
@@ -121,7 +118,7 @@ test("a repeated identical push is reported as already applied", async () => {
   assert.equal(second.pushId, first.pushId);
 });
 
-test("a changed workspace at an occupied destination requires an owned replace", async () => {
+test("a changed workspace at an occupied destination is a conflict, never a replace", async () => {
   const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const remotePath = path.join(destinationRoot, "app");
   const base = {
@@ -132,21 +129,37 @@ test("a changed workspace at an occupied destination requires an owned replace",
     signal: undefined,
     progress: undefined,
   };
-  await pushWorkspace(harness.transport, config.gateway, { ...base, replace: false });
+  await pushWorkspace(harness.transport, config.gateway, base);
 
   await fs.writeFile(path.join(sourceRoot, "a.txt"), "changed");
   await assert.rejects(
-    () => pushWorkspace(harness.transport, config.gateway, { ...base, replace: false }),
+    () => pushWorkspace(harness.transport, config.gateway, base),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
   );
-
-  const replaced = await pushWorkspace(harness.transport, config.gateway, { ...base, replace: true });
-  assert.equal(replaced.status, "published");
-  assert.equal(replaced.replaced, true);
-  assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "changed");
+  assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "alpha");
 });
 
-test("replace never clobbers a foreign directory", async () => {
+test("an unchanged marker with modified node content is drift, not already-applied", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  const remotePath = path.join(destinationRoot, "app");
+  const input = {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath,
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  };
+  await pushWorkspace(harness.transport, config.gateway, input);
+  await fs.writeFile(path.join(remotePath, "a.txt"), "TAMPERED ON NODE");
+  await assert.rejects(
+    () => pushWorkspace(harness.transport, config.gateway, input),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-drifted",
+  );
+  assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "TAMPERED ON NODE");
+});
+
+test("a foreign directory is never replaced or deleted", async () => {
   const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const remotePath = path.join(destinationRoot, "foreign");
   await fs.mkdir(remotePath);
@@ -157,12 +170,11 @@ test("replace never clobbers a foreign directory", async () => {
         node: "node-1",
         localPath: sourceRoot,
         remotePath,
-        replace: true,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
       }),
-    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-not-owned",
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
   );
   assert.equal(await fs.readFile(path.join(remotePath, "precious.txt"), "utf8"), "keep");
 });
@@ -176,7 +188,6 @@ test("a destination outside the node roots is rejected before anything is writte
         node: "node-1",
         localPath: sourceRoot,
         remotePath: path.join(outside, "app"),
-        replace: false,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -196,7 +207,6 @@ test("a symlinked parent cannot escape a node push root", async () => {
         node: "node-1",
         localPath: sourceRoot,
         remotePath: path.join(destinationRoot, "link", "app"),
-        replace: false,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -223,7 +233,6 @@ test("transport loss after acceptance is an explicit unknown outcome, not a fail
         node: "node-1",
         localPath: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
-        replace: false,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -259,7 +268,6 @@ test("a tampered file is rejected by the node's per-file digest", async () => {
         node: "node-1",
         localPath: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
-        replace: false,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -285,7 +293,6 @@ test("a local path outside gateway.localRoots is never scanned", async () => {
         node: "node-1",
         localPath: outside,
         remotePath: path.join(outside, "copy"),
-        replace: false,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -305,7 +312,6 @@ test("a symlinked destination is rejected, not replaced", async () => {
         node: "node-1",
         localPath: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
-        replace: true,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
@@ -314,7 +320,7 @@ test("a symlinked destination is rejected, not replaced", async () => {
   );
 });
 
-test("a foreign marker does not make a directory replaceable", async () => {
+test("a foreign marker is never treated as ownership", async () => {
   const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const remotePath = path.join(destinationRoot, "app");
   await fs.mkdir(remotePath);
@@ -328,12 +334,11 @@ test("a foreign marker does not make a directory replaceable", async () => {
         node: "node-1",
         localPath: sourceRoot,
         remotePath,
-        replace: true,
         exclude: undefined,
         signal: undefined,
         progress: undefined,
       }),
-    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-not-owned",
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
   );
 });
 
@@ -349,5 +354,136 @@ test("the node validates a hello that never passed Gateway scanning", async () =
   await assert.rejects(
     async () => push.handle(undefined, { signal: undefined }),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "protocol",
+  );
+});
+
+test("a stale staging directory never blocks a retry or a first attempt", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
+  const remotePath = path.join(destinationRoot, "app");
+  const input = {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath,
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  };
+  const first = await pushWorkspace(harness.transport, config.gateway, input);
+  await fs.mkdir(path.join(destinationRoot, `.app.nodews-${first.pushId}`), { recursive: true });
+  const again = await pushWorkspace(harness.transport, config.gateway, input);
+  assert.equal(again.status, "already-applied");
+  assert.equal(again.pushId, first.pushId);
+});
+
+test("a destination created during transfer is never renamed or deleted", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({
+    "big.bin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  });
+  const remotePath = path.join(destinationRoot, "app");
+  let swapped = false;
+  const racing = {
+    ...harness.transport,
+    async openDuplex(request: Parameters<typeof harness.transport.openDuplex>[0]) {
+      const channel = await harness.transport.openDuplex(request);
+      const send = channel.send.bind(channel);
+      channel.send = async (message: Uint8Array) => {
+        if (!swapped && message[0] === 1) {
+          swapped = true;
+          await fs.mkdir(remotePath);
+          await fs.writeFile(path.join(remotePath, "precious.txt"), "not yours");
+        }
+        return send(message);
+      };
+      return channel;
+    },
+  };
+  await assert.rejects(
+    () =>
+      pushWorkspace(racing, config.gateway, {
+        node: "node-1",
+        localPath: sourceRoot,
+        remotePath,
+        exclude: undefined,
+        signal: undefined,
+        progress: undefined,
+      }),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "destination-exists",
+  );
+  assert.equal(await fs.readFile(path.join(remotePath, "precious.txt"), "utf8"), "not yours");
+});
+
+test("a root of / matches its children instead of failing on a // prefix", async () => {
+  const sourceRoot = await workspace({ "a.txt": "alpha" });
+  const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-root-dst-"));
+  const raw = {
+    gateway: { localRoots: ["/"], chunkBytes: 1024, timeoutMs: 20_000 },
+    node: { pushRoots: [destinationRoot] },
+  };
+  const config = resolvePluginConfig(raw);
+  const harness = createHarness(createNodeCommands(raw).commands);
+  const outcome = await pushWorkspace(harness.transport, config.gateway, {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "app"),
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  });
+  assert.equal(outcome.status, "published");
+});
+
+test("skipped symlinks are returned, not silently dropped", async () => {
+  const sourceRoot = await workspace({ "a.txt": "alpha" });
+  await fs.symlink("a.txt", path.join(sourceRoot, "link.txt"));
+  const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-skip-dst-"));
+  const raw = {
+    gateway: { localRoots: [sourceRoot], chunkBytes: 1024, timeoutMs: 20_000, symlinks: "skip" },
+    node: { pushRoots: [destinationRoot] },
+  };
+  const config = resolvePluginConfig(raw);
+  const harness = createHarness(createNodeCommands(raw).commands);
+  const outcome = await pushWorkspace(harness.transport, config.gateway, {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "app"),
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  });
+  assert.deepEqual(outcome.skipped, [{ path: "link.txt", reason: "symlink" }]);
+});
+
+test("a published-but-failed node result is an unknown outcome", async () => {
+  const { sourceRoot, destinationRoot, config } = await setup({ "a.txt": "alpha" });
+  const raw = {
+    gateway: { localRoots: [sourceRoot], chunkBytes: 1024, timeoutMs: 20_000 },
+    node: { pushRoots: [destinationRoot] },
+  };
+  const harness = createHarness(createNodeCommands(raw).commands, {
+    nodeFrame: (frame) => {
+      if (frame[0] !== 2) return undefined;
+      const value = JSON.parse(Buffer.from(frame.subarray(1)).toString("utf8")) as Record<string, unknown>;
+      if (value.t !== "result" || value.ok !== true) return undefined;
+      const body = Buffer.from(
+        JSON.stringify({ t: "result", ok: false, code: "io", message: "fsync failed", published: true }),
+        "utf8",
+      );
+      const next = new Uint8Array(body.byteLength + 1);
+      next[0] = 2;
+      next.set(body, 1);
+      return next;
+    },
+  });
+  await assert.rejects(
+    () =>
+      pushWorkspace(harness.transport, config.gateway, {
+        node: "node-1",
+        localPath: sourceRoot,
+        remotePath: path.join(destinationRoot, "app"),
+        exclude: undefined,
+        signal: undefined,
+        progress: undefined,
+      }),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "unknown-outcome",
   );
 });

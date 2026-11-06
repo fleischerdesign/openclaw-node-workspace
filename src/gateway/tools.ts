@@ -47,6 +47,69 @@ function progressText(progress: PushProgress): string {
   return `Node workspace ${progress.phase}: ${files}, ${mib} MiB`;
 }
 
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new NodeWorkspaceError("path-invalid", `${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireField(record: Record<string, unknown>, key: string, maximum: number): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
+    throw new NodeWorkspaceError("path-invalid", `${key} must be a non-empty string of at most ${maximum} characters`);
+  }
+  if (value.includes("\0")) throw new NodeWorkspaceError("path-invalid", `${key} must not contain a NUL byte`);
+  return value;
+}
+
+interface PushParams {
+  readonly node: string;
+  readonly localPath: string;
+  readonly remotePath: string;
+  readonly exclude: readonly string[] | undefined;
+}
+
+function parsePushParams(value: unknown): PushParams {
+  const record = requireRecord(value, "push parameters");
+  const excludeValue = record.exclude;
+  let exclude: string[] | undefined;
+  if (excludeValue !== undefined) {
+    if (!Array.isArray(excludeValue) || excludeValue.length > 200) {
+      throw new NodeWorkspaceError("path-invalid", "exclude must be an array of at most 200 patterns");
+    }
+    exclude = excludeValue.map((entry, index) => {
+      if (typeof entry !== "string" || entry.length === 0 || entry.length > 1024) {
+        throw new NodeWorkspaceError("path-invalid", `exclude[${index}] must be a non-empty string`);
+      }
+      return entry;
+    });
+  }
+  return {
+    node: requireField(record, "node", 256),
+    localPath: requireField(record, "localPath", 4096),
+    remotePath: requireField(record, "remotePath", 4096),
+    exclude,
+  };
+}
+
+function parseArtifactParams(value: unknown): { node: string; remotePath: string; localPath: string } {
+  const record = requireRecord(value, "artifact parameters");
+  return {
+    node: requireField(record, "node", 256),
+    remotePath: requireField(record, "remotePath", 4096),
+    localPath: requireField(record, "localPath", 4096),
+  };
+}
+
+function parseStatusParams(value: unknown): { node: string; remotePath: string } {
+  const record = requireRecord(value, "status parameters");
+  return {
+    node: requireField(record, "node", 256),
+    remotePath: requireField(record, "remotePath", 4096),
+  };
+}
+
 const pushParameters = Type.Object(
   {
     node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
@@ -57,14 +120,8 @@ const pushParameters = Type.Object(
     remotePath: Type.String({
       minLength: 1,
       description:
-        "Absolute POSIX destination directory on the node. Must be a new path, or a directory this plugin previously published when replace=true.",
+        "Absolute POSIX destination directory on the node. It must not exist; this plugin never replaces an existing directory.",
     }),
-    replace: Type.Optional(
-      Type.Boolean({
-        description:
-          "Replace the destination only when it carries this plugin's marker. Defaults to false and never clobbers a foreign directory.",
-      }),
-    ),
     exclude: Type.Optional(
       Type.Array(Type.String({ minLength: 1 }), {
         description: "Additional minimatch patterns relative to the selected workspace root.",
@@ -86,7 +143,7 @@ const pushDetails = Type.Object(
     bytes: Type.Number(),
     durationMs: Type.Number(),
     skipped: Type.Number(),
-    replaced: Type.Boolean(),
+    skippedPaths: Type.Array(Type.String()),
   },
   { additionalProperties: false },
 );
@@ -136,6 +193,18 @@ const markerSchema = Type.Object(
     files: Type.Number(),
     bytes: Type.Number(),
     createdAt: Type.String(),
+    manifest: Type.Array(
+      Type.Object(
+        {
+          path: Type.String(),
+          size: Type.Number(),
+          sha256: Type.String(),
+          executable: Type.Boolean(),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    directories: Type.Array(Type.String()),
   },
   { additionalProperties: false },
 );
@@ -148,6 +217,8 @@ const statusDetails = Type.Object(
     exists: Type.Boolean(),
     parentExists: Type.Boolean(),
     owned: Type.Boolean(),
+    verified: Type.Boolean(),
+    drift: Type.Union([Type.String(), Type.Null()]),
     marker: Type.Union([markerSchema, Type.Null()]),
   },
   { additionalProperties: false },
@@ -164,24 +235,17 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         "Publish one explicitly selected local directory to a paired node over the OpenClaw node channel. " +
         "This is one-way (Gateway to node), verifies every file by SHA-256, and publishes atomically. " +
         "It does not run commands: the result returns the node id and remote cwd so you can invoke the native exec tool with host=node yourself. " +
-        "The destination must be new, or a directory this plugin previously published when replace=true.",
+        "The destination must be new. An existing directory with the same content is reported as already-applied only after its bytes are re-verified; a different directory is a conflict and is never replaced.",
       parameters: pushParameters,
       outputSchema: pushDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
         const config = requireConfig(deps);
-        const input = params as {
-          node: string;
-          localPath: string;
-          remotePath: string;
-          replace?: boolean;
-          exclude?: string[];
-        };
         try {
+          const input = parsePushParams(params);
           const outcome = await pushWorkspace(deps.transport, config, {
             node: input.node,
             localPath: input.localPath,
             remotePath: input.remotePath,
-            replace: input.replace === true,
             exclude: input.exclude,
             signal,
             progress: onUpdate
@@ -200,14 +264,20 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           });
           const mib = (outcome.bytes / (1024 * 1024)).toFixed(2);
           const verb = outcome.status === "already-applied" ? "already present" : "published";
+          const skippedNote =
+            outcome.skipped.length === 0
+              ? ""
+              : ` ${outcome.skipped.length} entries were skipped (symlink or exclude rule); see details.skippedPaths.`;
           return {
             content: [
               {
                 type: "text" as const,
                 text:
                   `${verb}: ${outcome.files} files (${mib} MiB) at ${outcome.cwd} on node ${outcome.nodeId}. ` +
-                  `sha256 tree digest ${outcome.digest}${outcome.replaced ? " (replaced the previous plugin-owned copy)" : ""}. ` +
-                  `One-way copy; later Gateway changes are not synchronized. ` +
+                  `sha256 tree digest ${outcome.digest}. ` +
+                  `One-way copy; later Gateway changes are not synchronized.` +
+                  skippedNote +
+                  ` ` +
                   `Run commands there with the exec tool: host=node, node=${outcome.nodeId}, workdir=${outcome.cwd}.`,
               },
             ],
@@ -221,8 +291,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               files: outcome.files,
               bytes: outcome.bytes,
               durationMs: outcome.durationMs,
-              skipped: outcome.skipped,
-              replaced: outcome.replaced,
+              skipped: outcome.skipped.length,
+              skippedPaths: outcome.skipped.map((entry) => entry.path),
             },
           };
         } catch (error) {
@@ -241,8 +311,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       outputSchema: artifactDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
         const config = requireConfig(deps);
-        const input = params as { node: string; remotePath: string; localPath: string };
         try {
+          const input = parseArtifactParams(params);
           const outcome = await fetchArtifact(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
@@ -295,8 +365,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       outputSchema: statusDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
         const config = requireConfig(deps);
-        const input = params as { node: string; remotePath: string };
         try {
+          const input = parseStatusParams(params);
           const outcome: StatusOutcome = await workspaceStatus(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
@@ -304,9 +374,11 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           });
           const text = !outcome.exists
             ? `${outcome.remotePath} does not exist on node ${outcome.nodeId}.`
-            : outcome.owned
-              ? `${outcome.remotePath} is owned by this plugin (push ${outcome.marker?.pushId}, digest ${outcome.marker?.digest}).`
-              : `${outcome.remotePath} exists but has no node-workspace marker; this plugin did not publish it.`;
+            : outcome.owned && outcome.verified
+              ? `${outcome.remotePath} is owned by this plugin and its bytes still match the published manifest (push ${outcome.marker?.pushId}, digest ${outcome.marker?.digest}).`
+              : outcome.owned
+                ? `${outcome.remotePath} has a marker but the content no longer matches: ${outcome.drift ?? "verification failed"}.`
+                : `${outcome.remotePath} exists but has no node-workspace marker; this plugin did not publish it.`;
           return {
             content: [{ type: "text" as const, text }],
             details: {
@@ -316,6 +388,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               exists: outcome.exists,
               parentExists: outcome.parentExists,
               owned: outcome.owned,
+              verified: outcome.verified,
+              drift: outcome.drift,
               marker: outcome.marker,
             },
           };

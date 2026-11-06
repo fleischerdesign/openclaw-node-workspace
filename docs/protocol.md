@@ -22,7 +22,7 @@ than buffered without bound.
 
 | Message | Direction | Fields |
 | --- | --- | --- |
-| `hello` | G→N | `protocol: 1`, `pushId`, `remotePath`, `replace`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]` |
+| `hello` | G→N | `protocol: 2`, `pushId`, `remotePath`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]` |
 | `accepted` | N→G | `pushId` |
 | `rejected` | N→G | `code`, `message` |
 | `progress` | N→G | `phase`, `filesDone`, `bytesDone` |
@@ -31,21 +31,23 @@ than buffered without bound.
 | `file-ok` | N→G | `path`, `bytes`, `sha256` |
 | `file-error` | N→G | `path`, `code`, `message` |
 | `end` | G→N | — |
-| `result` (ok) | N→G | `pushId`, `digest`, `files`, `bytes`, `replaced` |
+| `result` (ok) | N→G | `pushId`, `digest`, `files`, `bytes` |
 | `result` (error) | N→G | `code`, `message`, `published` |
 
 Manifest entries are `{ path, size, sha256, executable }`, where `path` is relative POSIX, `sha256`
 is lowercase hex, and `executable` records whether any owner execute bit was set. Directories are
 relative POSIX paths and include empty directories.
 
-Files are sent in manifest order. The node enforces that order, so an out-of-order or duplicated
+The node stages into a unique `.name.nodews-<pushId>-<suffix>` directory, so a leftover staging
+directory from a crash never blocks a later attempt and is never treated as a destination. Files are
+sent in manifest order. The node enforces that order, so an out-of-order or duplicated
 `file` header is a protocol error. The Gateway waits for `file-ok` before sending the next header.
 
 ### Validation on the node
 
 Before accepting, the node independently checks:
 
-- `protocol` is exactly `1`; `pushId` is 16–64 lowercase hex; `treeDigest` is 64 lowercase hex;
+- `protocol` is exactly `2`; `pushId` is 16–64 lowercase hex; `treeDigest` is 64 lowercase hex;
 - entry count and byte totals against its own limits;
 - every path against the traversal, empty-segment, absolute, backslash, length, and reserved-marker
   rules;
@@ -53,8 +55,8 @@ Before accepting, the node independently checks:
   `totalBytes` equals the manifest sum;
 - `remotePath` is normalized and absolute, its parent exists, is a real directory, and resolves
   inside a configured `node.pushRoots` entry;
-- the destination is absent, already has this plugin's marker for the same push id and digest, or is
-  an owned directory with `replace=true`.
+- the destination is absent, or it already has this plugin's marker for the same push id and digest
+  and every byte re-hashes to the manifest. Different content is never replaced.
 
 Nothing is written before these checks pass.
 
@@ -66,7 +68,8 @@ Nothing is written before these checks pass.
 pushId = sha256(nodeId + "\n" + remotePath + "\n" + treeDigest)[0..32]
 ```
 
-A repeated identical push finds the marker and returns `result` with the same digest without writing.
+A repeated identical push finds the marker, re-hashes the destination against the manifest, and
+returns `result` with the same digest without writing. Modified content fails `destination-drifted`.
 A different manifest produces a different push id, so the occupied destination is a conflict, not a
 silent overwrite.
 
@@ -102,15 +105,15 @@ requires the announced size, and compares the digest. The destination appears on
 | Data chunk | 64 KiB (max 1 MiB) | Gateway sender |
 | Duplex message | OpenClaw default (100 MiB ceiling) | SDK |
 | Control frame | 8 MiB | both |
-| Whole operation | 120 s | Gateway |
-| Control wait | 120 s or remaining deadline | Gateway |
-| Control wait on node | 120 s | node |
+| Whole operation | `timeoutMs` (default 120 s) | Gateway, absolute deadline |
+| Per-frame wait | min(120 s, remaining deadline) | Gateway and node |
+| Node operation | 300 s absolute | node |
 
 A timeout before `accepted` means nothing was published. A timeout after `accepted` is reported as
 `unknown-outcome`; see [Operations](operations.md).
 
 ## Compatibility
 
-Protocol version `1` is the only version. Both sides must run the same plugin major version; the
+Protocol version `2` is the only version. Both sides must run the same plugin major version; the
 node rejects any other `protocol` value rather than guessing. OpenClaw plugin APIs are experimental,
 so pin the OpenClaw version and test both hosts on upgrade.

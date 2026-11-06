@@ -6,8 +6,8 @@ import type { GatewayConfig } from "../config.js";
 import { derivePushId } from "../digest.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
 import { scanWorkspace, type ScanResult } from "../manifest.js";
-import { normalizeAbsolutePosixPath } from "../paths.js";
-import { COMMAND_PUSH } from "../protocol.js";
+import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { COMMAND_PUSH, PROTOCOL_VERSION } from "../protocol.js";
 import {
   assertControlFrame,
   controlType,
@@ -28,7 +28,6 @@ export interface PushInput {
   readonly node: string;
   readonly localPath: string;
   readonly remotePath: string;
-  readonly replace: boolean;
   readonly exclude: readonly string[] | undefined;
   readonly signal: AbortSignal | undefined;
   readonly progress: ((progress: PushProgress) => void) | undefined;
@@ -43,8 +42,7 @@ export interface PushOutcome {
   readonly files: number;
   readonly bytes: number;
   readonly durationMs: number;
-  readonly skipped: number;
-  readonly replaced: boolean;
+  readonly skipped: readonly { readonly path: string; readonly reason: "symlink" | "excluded" }[];
 }
 
 const DEFAULT_FRAME_TIMEOUT_MS = 120_000;
@@ -84,7 +82,7 @@ async function resolveLocalWorkspace(localPath: string, config: GatewayConfig): 
       // A configured root that does not exist grants nothing.
     }
   }
-  const allowed = roots.some((root) => real === root || real.startsWith(`${root}/`));
+  const allowed = roots.some((root) => isWithin(root, real));
   if (!allowed) {
     throw new NodeWorkspaceError(
       "path-outside-root",
@@ -95,6 +93,13 @@ async function resolveLocalWorkspace(localPath: string, config: GatewayConfig): 
 }
 
 function mapRejected(value: Record<string, unknown>): NodeWorkspaceError {
+  if (value.ok === false && value.published === true) {
+    return new NodeWorkspaceError(
+      "unknown-outcome",
+      "the node reported that it published the workspace but the operation failed afterwards. " +
+        "Do not retry blindly; call node_workspace_status with the same remotePath.",
+    );
+  }
   const code = typeof value.code === "string" ? value.code : "node-rejected";
   const message = typeof value.message === "string" ? value.message : "the node rejected the operation";
   return new NodeWorkspaceError(code as NodeWorkspaceError["code"], message);
@@ -127,6 +132,7 @@ export async function pushWorkspace(
     maxFileBytes: config.maxFileBytes,
     maxTotalBytes: config.maxTotalBytes,
     signal: input.signal,
+    deadline,
   });
   checkAborted(input.signal);
 
@@ -153,10 +159,9 @@ export async function pushWorkspace(
 
     await session.sendControl({
       t: "hello",
-      protocol: 1,
+      protocol: PROTOCOL_VERSION,
       pushId,
       remotePath,
-      replace: input.replace,
       totalBytes: scan.totalBytes,
       treeDigest: scan.treeDigest,
       manifest: scan.files,
@@ -204,8 +209,7 @@ export async function pushWorkspace(
         files: scan.files.length,
         bytes: scan.totalBytes,
         durationMs: Date.now() - startedAt,
-        skipped: scan.skipped.length,
-        replaced: false,
+        skipped: scan.skipped,
       };
     }
 
@@ -221,6 +225,7 @@ export async function pushWorkspace(
 
     for (const entry of scan.files) {
       checkAborted(input.signal);
+      if (Date.now() >= deadline) throw new NodeWorkspaceError("timeout", "the push exceeded its time limit");
       await session.sendControl({ t: "file", path: entry.path });
       const absolute = path.join(root, ...entry.path.split("/"));
       const handle = await fs.open(absolute, "r");
@@ -230,6 +235,7 @@ export async function pushWorkspace(
         let sent = 0;
         for (;;) {
           checkAborted(input.signal);
+          if (Date.now() >= deadline) throw new NodeWorkspaceError("timeout", "the push exceeded its time limit");
           const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, sent);
           if (bytesRead === 0) break;
           const chunk = buffer.subarray(0, bytesRead);
@@ -314,8 +320,7 @@ export async function pushWorkspace(
           files: scan.files.length,
           bytes: scan.totalBytes,
           durationMs: Date.now() - startedAt,
-          skipped: scan.skipped.length,
-          replaced: value.replaced === true,
+          skipped: scan.skipped,
         };
       }
       throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} after the push`);

@@ -48,13 +48,14 @@ export class FrameSession {
   #queue: { frame: Frame; bytes: number }[] = [];
   #queuedBytes = 0;
   #waiter: Waiter | undefined;
+  #unsubscribe: (() => void) | undefined;
   #closedError: Error | undefined;
   #closeReason: Error | undefined;
   #disposed = false;
 
   private constructor(channel: DuplexChannel) {
     this.#channel = channel;
-    channel.onMessage((message) => {
+    this.#unsubscribe = channel.onMessage((message) => {
       const bytes = message.byteLength;
       let frame: Frame;
       try {
@@ -106,6 +107,8 @@ export class FrameSession {
   #fail(error: Error): void {
     if (this.#disposed || this.#closedError) return;
     this.#closedError = error;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
     const waiter = this.#waiter;
     this.#waiter = undefined;
     if (waiter) {
@@ -135,6 +138,9 @@ export class FrameSession {
   }
 
   async next(timeoutMs: number): Promise<Frame> {
+    if (this.#waiter) {
+      throw new NodeWorkspaceError("protocol", "concurrent frame reads are not supported");
+    }
     if (this.#queue.length > 0) {
       const entry = this.#queue.shift();
       if (entry) {
@@ -156,6 +162,8 @@ export class FrameSession {
   close(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
     if (this.#closeReason) this.#closedError ??= this.#closeReason;
     try {
       this.#channel.close();

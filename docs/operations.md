@@ -48,12 +48,12 @@ returns the cwd precisely so the agent can choose the next action.
 whether the rename happened.
 
 1. Call `node_workspace_status` with the same `remotePath`.
-2. If it reports `exists: true, owned: true` with the expected `digest`, the push succeeded. The
-   marker is the proof.
+2. If it reports `exists: true, owned: true, verified: true` with the expected `digest`, the push
+   succeeded. The node re-hashed the directory against the manifest; the marker alone is not the
+   proof.
 3. If it reports `exists: false`, the push did not publish; retrying the same content is safe.
-4. If it reports a different digest or `owned: false`, inspect the directory manually. Do not use
-   `replace=true` unless you intend to replace what is there; a foreign directory is never replaced
-   even with `replace=true`.
+4. If it reports `verified: false` or `owned: false`, inspect the directory manually. Never delete
+   or replace a directory you did not create; the plugin itself will not.
 
 Do not retry by changing `remotePath` to get around a conflict. That creates a second copy and hides
 the state you are trying to reconcile.
@@ -61,20 +61,18 @@ the state you are trying to reconcile.
 ## Partial or stale copies
 
 There are none, by construction: a destination is either absent or a complete verified tree. If a
-process is killed mid-push, the staging directory (`.<name>.nodews-<pushId>`) may remain next to the
-destination. It is never published and can be removed after confirming no push with that id is still
-running. `node_workspace_status` does not treat staging as a destination.
+process is killed mid-push, the staging directory (`.<name>.nodews-<pushId>-<suffix>`) may remain next
+to the destination. It is never published, never blocks a later attempt, and can be removed after
+confirming no push is still running. `node_workspace_status` does not treat staging as a destination.
 
-A `replace=true` has one crash window: the previous directory is renamed to
-`.<name>.nodews-<pushId>.previous-<uuid>` before the staged tree takes its name. If the process is
-killed between those two renames, the destination is absent and the previous copy is under that
-backup name. Restore it by renaming it back; do not publish over the gap.
+There is no replacement path, so there is no swap window: the only mutation of the destination
+namespace is one `rename` that requires the name to be absent.
 
 ## Disk space
 
 The plugin checks file and byte limits before sending, but not free space on the node. A full
 filesystem fails the push with an I/O error before publication; staging is removed on a best-effort
-basis. Leave headroom for the largest configured push plus the previous copy during `replace=true`.
+basis. Leave headroom for the largest configured push; publication itself allocates no second full copy.
 
 ## Upgrades
 

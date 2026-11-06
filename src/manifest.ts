@@ -20,6 +20,7 @@ export interface ScanRequest {
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
   readonly signal?: AbortSignal | undefined;
+  readonly deadline?: number | undefined;
 }
 
 export interface SkippedEntry {
@@ -36,7 +37,10 @@ export interface ScanResult {
   readonly skipped: readonly SkippedEntry[];
 }
 
-function checkAborted(signal: AbortSignal | undefined): void {
+function checkAborted(signal: AbortSignal | undefined, deadline?: number): void {
+  if (deadline !== undefined && Date.now() > deadline) {
+    throw new NodeWorkspaceError("timeout", "the scan exceeded the operation deadline");
+  }
   if (signal?.aborted) {
     throw new NodeWorkspaceError("canceled", "the push was canceled before it finished scanning", {}, {
       cause: signal.reason,
@@ -115,7 +119,7 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
   let totalBytes = 0;
 
   const walk = async (relativeDir: string): Promise<void> => {
-    checkAborted(request.signal);
+    checkAborted(request.signal, request.deadline);
     const absoluteDir = relativeDir.length === 0 ? root : path.join(root, relativeDir);
     let entries;
     try {
@@ -126,7 +130,7 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
     entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 
     for (const entry of entries) {
-      checkAborted(request.signal);
+      checkAborted(request.signal, request.deadline);
       const relativePath = relativeDir.length === 0 ? entry.name : `${relativeDir}/${entry.name}`;
       const absolutePath = path.join(root, relativePath);
       if (excluded(relativePath)) {

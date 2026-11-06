@@ -13,7 +13,7 @@ after it are not propagated, and nothing on the node is ever deleted implicitly.
 | --- | --- |
 | `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and publishes it atomically on the node. Returns the canonical node id and the remote `cwd`. |
 | `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
-| `node_workspace_status` | Read-only check of a node destination: present or absent, and whether this plugin published it (push id and tree digest). |
+| `node_workspace_status` | Read-only check of a node destination: present or absent, whether this plugin published it, and whether the bytes still match the published manifest. |
 
 After a push the agent runs commands itself through the native `exec` tool with `host=node`. The
 plugin does not proxy execution.
@@ -144,6 +144,11 @@ The result names the node id and `cwd`, for example:
 > 6f1c… One-way copy; later Gateway changes are not synchronized. Run commands there with the exec
 > tool: host=node, node=hom-wrk-01, workdir=/home/agent/work/report.
 
+`remotePath` must not exist. If an identical earlier push is still there, the node re-hashes every
+file and reports `already-applied`; any difference is `destination-exists` or `destination-drifted`,
+and the existing directory is left untouched. Entries omitted by `symlinks: "skip"` or an exclude
+pattern are returned in `details.skippedPaths`, not silently dropped.
+
 Progress is reported per tool as a phase plus file and byte counts (`scanning`, `sending`,
 `publishing`); no file paths or contents enter progress text.
 
@@ -170,19 +175,20 @@ happened.
 | `path-invalid`, `path-outside-root`, `path-not-found`, `not-a-directory` | Path rejected before transfer. |
 | `symlink-rejected`, `special-file-rejected` | The selected tree contains a link or non-regular file and the policy is not `skip`. |
 | `limit-exceeded` | File count or byte limits rejected the operation before publication. |
-| `destination-exists` | The destination exists and was not created by this plugin, or no `replace` was requested. |
-| `destination-not-owned` | `replace=true`, but the destination has no valid plugin marker. |
+| `destination-exists` | The destination exists with different content. This plugin never replaces an existing directory. |
+| `destination-drifted` | A previous push marker matches, but the node copy no longer matches its manifest. |
 | `node-rejected` | The node returned a coded rejection; nothing was published. |
 | `protocol` | A frame was malformed or out of order. The operation failed; nothing was published. |
 | `integrity` | A digest or byte count disagreed. Treat the copy as invalid. |
 | `transport`, `timeout`, `canceled` | The channel failed **before** the node accepted the push; no effect. |
 | `unknown-outcome` | The channel failed **after** the node accepted the push. The plugin cannot prove whether publication happened. |
-| `conflict` | A staging directory or ambiguous node name conflicts with this operation. |
+| `conflict` | A node name matches more than one paired node; use a node id. |
 
 `unknown-outcome` never claims failure. Do not retry it blindly: call `node_workspace_status` with
 the same `remotePath` first. A retry of the same content to the same destination derives the same
-push id, so if the first attempt did publish, the node reports `already-applied` instead of writing
-a second copy. A different content at an occupied destination requires `replace=true`.
+push id, so if the first attempt did publish, the node re-verifies every byte and reports
+`already-applied`; if the content changed on the node it reports `destination-drifted` instead.
+An occupied destination with different content is never replaced.
 
 See [Operations](docs/operations.md) for the full runbook.
 

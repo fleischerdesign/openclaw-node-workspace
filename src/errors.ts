@@ -9,7 +9,7 @@ export type NodeWorkspaceErrorCode =
   | "limit-exceeded"
   | "invalid-manifest"
   | "destination-exists"
-  | "destination-not-owned"
+  | "destination-drifted"
   | "node-not-configured"
   | "node-rejected"
   | "protocol"

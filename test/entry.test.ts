@@ -101,4 +101,14 @@ test("the registered push tool publishes through the injected runtime and return
   assert.equal(result.details.cwd, remotePath);
   assert.match(result.content[0]?.text ?? "", /host=node/);
   assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "alpha");
+
+  await assert.rejects(
+    () => pushTool.execute("bad-1", { node: "", localPath: source, remotePath }),
+    /path-invalid/,
+  );
+  await assert.rejects(
+    () => pushTool.execute("bad-2", { node: "node-1", localPath: 5, remotePath }),
+    /path-invalid/,
+  );
+  await assert.rejects(() => pushTool.execute("bad-3", null), /path-invalid/);
 });

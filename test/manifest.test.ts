@@ -96,10 +96,9 @@ test("scan applies exclude patterns to entries and subtrees", async () => {
 test("validateManifestShape rejects traversal, duplicates, missing parents and byte mismatches", async () => {
   const hello = {
     t: "hello" as const,
-    protocol: 1 as const,
+    protocol: 2 as const,
     pushId: "a".repeat(32),
     remotePath: "/srv/work/app",
-    replace: false,
     totalBytes: 1,
     treeDigest: "b".repeat(64),
     manifest: [{ path: "a.txt", size: 1, sha256: "c".repeat(64), executable: false }],

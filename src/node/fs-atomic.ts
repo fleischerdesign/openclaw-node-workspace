@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { MARKER_FILE, assertDestinationName, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
-import { sha256Hex } from "../digest.js";
+import { sha256Hex, sortEntries, type ManifestEntry } from "../digest.js";
 
 export interface PushDestination {
   readonly destination: string;
@@ -26,7 +28,7 @@ async function realRoots(roots: readonly string[]): Promise<string[]> {
   return resolved;
 }
 
-async function resolveParent(remotePath: string): Promise<{ parent: string; name: string; root: string }> {
+async function resolveParent(remotePath: string): Promise<{ parent: string; name: string }> {
   const normalized = normalizeAbsolutePosixPath(remotePath);
   const name = assertDestinationName(path.posix.basename(normalized));
   const parentCandidate = path.posix.dirname(normalized);
@@ -45,7 +47,7 @@ async function resolveParent(remotePath: string): Promise<{ parent: string; name
   if (!parentStat.isDirectory()) {
     throw new NodeWorkspaceError("not-a-directory", `parent is not a directory: ${parentCandidate}`);
   }
-  return { parent: await fs.realpath(parentCandidate), name, root: parentCandidate };
+  return { parent: await fs.realpath(parentCandidate), name };
 }
 
 /**
@@ -76,6 +78,26 @@ export async function resolvePushDestination(
     throw new NodeWorkspaceError("path-outside-root", "destination is outside the configured node.pushRoots entry");
   }
   return { destination, parent: parent.parent, root: match };
+}
+
+/**
+ * Validate a destination path against the roots without requiring the parent
+ * to exist. Used by status, which must distinguish "absent" from "forbidden".
+ */
+export async function assertDestinationAllowed(
+  remotePath: string,
+  pushRoots: readonly string[],
+): Promise<string> {
+  if (pushRoots.length === 0) {
+    throw new NodeWorkspaceError("node-not-configured", "node.pushRoots is empty; no destination is allowed");
+  }
+  const normalized = normalizeAbsolutePosixPath(remotePath);
+  const roots = await realRoots(pushRoots);
+  const lexicalMatch = roots.some((root) => isWithin(root, normalized));
+  if (!lexicalMatch) {
+    throw new NodeWorkspaceError("path-outside-root", "destination is outside every configured node.pushRoots entry");
+  }
+  return normalized;
 }
 
 /** Resolve an existing regular file inside an artifact root. */
@@ -119,14 +141,18 @@ export interface Marker {
   readonly files: number;
   readonly bytes: number;
   readonly createdAt: string;
+  readonly manifest: readonly ManifestEntry[];
+  readonly directories: readonly string[];
 }
+
+const MAX_MARKER_BYTES = 4 * 1024 * 1024;
 
 export async function readMarker(destination: string): Promise<Marker | undefined> {
   try {
     const markerPath = path.join(destination, MARKER_FILE);
     const stat = await fs.lstat(markerPath);
     // A symlinked or oversized marker is not proof of ownership.
-    if (!stat.isFile() || stat.size > 64 * 1024) return undefined;
+    if (!stat.isFile() || stat.size > MAX_MARKER_BYTES) return undefined;
     const raw = await fs.readFile(markerPath, { encoding: "utf8" });
     const value = JSON.parse(raw) as Partial<Marker>;
     if (
@@ -136,7 +162,9 @@ export async function readMarker(destination: string): Promise<Marker | undefine
       typeof value.digest !== "string" ||
       typeof value.files !== "number" ||
       typeof value.bytes !== "number" ||
-      typeof value.createdAt !== "string"
+      typeof value.createdAt !== "string" ||
+      !Array.isArray(value.manifest) ||
+      !Array.isArray(value.directories)
     ) {
       return undefined;
     }
@@ -157,7 +185,13 @@ export async function markerMatches(
 
 export async function writeMarker(directory: string, marker: Marker): Promise<void> {
   const target = path.join(directory, MARKER_FILE);
-  await fs.writeFile(target, `${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const handle = await fs.open(target, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(marker, null, 2)}\n`, { encoding: "utf8" });
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Re-hash every staged file so the published bytes, not only the wire bytes, are verified. */
@@ -174,14 +208,100 @@ export async function verifyStagedTree(
   }
 }
 
+function drift(reason: string): never {
+  throw new NodeWorkspaceError("destination-drifted", reason);
+}
+
+/**
+ * Prove that the published directory still matches the manifest byte for byte.
+ *
+ * A marker alone only records what a previous push claimed; it cannot prove
+ * that the node's copy is unchanged. This walk rejects extra, missing, linked,
+ * or modified entries instead of reporting a stale copy as applied.
+ */
+export async function verifyTreeMatches(
+  destination: string,
+  manifest: readonly ManifestEntry[],
+  directories: readonly string[],
+): Promise<void> {
+  const expectedFiles = new Map(sortEntries(manifest).map((entry) => [entry.path, entry]));
+  const expectedDirectories = new Set(directories);
+  const seenFiles = new Set<string>();
+  const seenDirectories = new Set<string>();
+
+  const walk = async (relativeDir: string): Promise<void> => {
+    const absoluteDir = relativeDir.length === 0 ? destination : path.join(destination, relativeDir);
+    const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = relativeDir.length === 0 ? entry.name : `${relativeDir}/${entry.name}`;
+      if (relativeDir.length === 0 && entry.name === MARKER_FILE) continue;
+      const absolute = path.join(destination, ...relative.split("/"));
+      const stat = await fs.lstat(absolute);
+      if (stat.isSymbolicLink()) drift(`published tree contains a symlink at ${relative}`);
+      if (stat.isDirectory()) {
+        if (!expectedDirectories.has(relative)) drift(`published tree contains an unexpected directory ${relative}`);
+        if (seenDirectories.has(relative)) drift(`published tree repeats directory ${relative}`);
+        seenDirectories.add(relative);
+        await walk(relative);
+        continue;
+      }
+      if (!stat.isFile()) drift(`published tree contains a non-regular entry ${relative}`);
+      const expected = expectedFiles.get(relative);
+      if (!expected) drift(`published tree contains an unexpected file ${relative}`);
+      if (seenFiles.has(relative)) drift(`published tree repeats file ${relative}`);
+      if (stat.size !== expected.size) drift(`published file size differs at ${relative}`);
+      if (((stat.mode & 0o111) !== 0) !== expected.executable) {
+        drift(`published executable bit differs at ${relative}`);
+      }
+      const hash = createHash("sha256");
+      const stream = createReadStream(absolute);
+      for await (const chunk of stream) hash.update(chunk as Buffer);
+      if (hash.digest("hex") !== expected.sha256) drift(`published file content differs at ${relative}`);
+      seenFiles.add(relative);
+    }
+  };
+
+  await walk("");
+  for (const relative of expectedDirectories) {
+    if (!seenDirectories.has(relative)) drift(`published tree is missing directory ${relative}`);
+  }
+  for (const relative of expectedFiles.keys()) {
+    if (!seenFiles.has(relative)) drift(`published tree is missing file ${relative}`);
+  }
+}
+
+export async function fsyncTreeDirectories(root: string): Promise<void> {
+  const directories: string[] = [];
+  const walk = async (directory: string): Promise<void> => {
+    directories.push(directory);
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name));
+    }
+  };
+  await walk(root);
+  for (const directory of directories) await fsyncDirectory(directory);
+}
+
 export async function fsyncDirectory(directory: string): Promise<void> {
   let handle;
   try {
     handle = await fs.open(directory, "r");
     await handle.sync();
-  } catch {
-    // Directory fsync is best-effort; some filesystems reject it.
+  } catch (error) {
+    // Some filesystems reject directory fsync; anything else is a durability
+    // failure and must not be reported as a successful publication.
+    if (!isErrno(error, "EINVAL", "ENOTSUP", "EBADF")) {
+      throw new NodeWorkspaceError("io", `cannot sync directory ${directory}: ${errorMessage(error)}`, {}, {
+        cause: error,
+      });
+    }
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** Local artifact mode never inherits group/other bits from the node. */
+export function safeArtifactMode(remoteMode: number): number {
+  return (remoteMode & 0o111) !== 0 ? 0o700 : 0o600;
 }

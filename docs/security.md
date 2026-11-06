@@ -6,8 +6,9 @@
   only inside `gateway.artifactRoots`; a node push creates only below `node.pushRoots`; a node
   artifact reads only inside `node.artifactRoots`. Roots are resolved with `realpath`; an empty list
   denies the operation.
-- **Destinations are new or owned.** A push refuses an existing path unless it carries a valid
-  `node-workspace` marker and `replace=true`. A marker-less directory is never modified or deleted.
+- **Destinations are new.** A push refuses every existing destination. A marker only allows an
+  `already-applied` answer after the node re-hashes every file against the incoming manifest; it
+  never authorizes a rename, overwrite, or delete.
 - **No link following.** Symlinks in a selected workspace are rejected or skipped, never followed.
   A symlink at the node's destination or at any artifact path is rejected. A symlinked destination
   parent is rejected before resolution.
@@ -41,7 +42,8 @@
   digest.
 - **No confidentiality from the node.** Everything pushed is readable by the node's operating system
   account according to the file modes the plugin sets (0600, or 0700 for executable source files).
-  The marker is 0600.
+  The marker is 0600. An artifact never inherits group/other bits from the node: a remote 0777 is
+  published locally as 0700, and any non-executable mode as 0600.
 - **No preservation of ownership, ACLs, xattrs, hard links, or timestamps.** Only content and the
   executable bit are reproduced.
 - **No protection against a hostile root.** If `pushRoots` contains a directory that an untrusted
@@ -49,8 +51,8 @@
   is already lost. Configure roots under directories only the node's service account controls.
 - **No Windows support.** The path rules and publication model are POSIX. A Windows node is not a
   supported target, and the command's `isAvailable` is not used to claim otherwise.
-- **No deletion outside the plugin's own marker.** The only removal is replacing a directory this
-  plugin published, with `replace=true`.
+- **No deletion at all.** The plugin never removes a published directory or a file inside it;
+  replacing content means publishing to a new path out of band.
 
 ## Attack and failure matrix
 
@@ -62,8 +64,10 @@
 | Symlink inside the selected workspace | `symlink-rejected` (or omitted with `symlinks: "skip"`). |
 | Symlinked push destination or parent | `symlink-rejected`. |
 | Destination parent outside `pushRoots` | `path-outside-root`. |
-| Destination exists, no marker | `destination-exists`; `replace=true` alone gives `destination-not-owned`. |
-| Marker with wrong push id or digest | Not treated as already applied; replace is still allowed only for an owned directory. |
+| Destination exists, no marker | `destination-exists`; the directory is untouched. |
+| Marker with wrong push id or digest | `destination-exists`; the directory is untouched. |
+| Marker matches but a file changed | `destination-drifted`; the directory is untouched. |
+| File created at the destination during transfer | Rename fails `destination-exists`; the new directory is untouched. |
 | Bytes altered in transit | Per-file `integrity`; staging is removed and the destination is unchanged. |
 | Staged file altered on disk before publication | Re-hash fails with `integrity`; staging is removed. |
 | Peer sends more bytes than declared | `protocol`; staging is removed. |
