@@ -5,10 +5,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { GatewayConfig } from "../config.js";
+import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { scanWorkspace } from "../manifest.js";
-import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
-import { COMMAND_RETURN, PROTOCOL_VERSION } from "../protocol.js";
+import { assertSafeRelativePath, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { COMMAND_RETURN, PROTOCOL_VERSION, parseManifestEntry } from "../protocol.js";
 import { fsyncDirectory } from "../node/fs-atomic.js";
 import {
   assertControlFrame,
@@ -57,6 +58,8 @@ export interface ReturnOutcome {
   readonly unchanged: number;
   readonly removedOnNode: readonly string[];
   readonly bytesTransferred: number;
+  /** False when the local base record could not be written; files still applied. */
+  readonly stateRecorded: boolean;
   readonly durationMs: number;
 }
 
@@ -141,15 +144,39 @@ export async function previewReturn(
   const nodeId = await resolveNodeId(transport, input.node);
   const local = await resolveLocalTarget(input.localPath, config);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
+  const nodeExclude = [...config.exclude, ...(input.exclude ?? []), RETURN_STATE_FILE];
   const tree = await readNodeTree(transport, config, {
     node: nodeId,
     remotePath,
+    exclude: nodeExclude,
     ...(input.signal ? { signal: input.signal } : {}),
   });
+  if (tree.files.length + tree.directories.length > config.maxFiles) {
+    throw new NodeWorkspaceError(
+      "limit-exceeded",
+      `the node tree has ${tree.files.length} files and ${tree.directories.length} directories, above the Gateway limit of ${config.maxFiles} entries`,
+    );
+  }
+  let treeBytes = 0;
+  for (const entry of tree.files) {
+    if (entry.size > config.maxFileBytes) {
+      throw new NodeWorkspaceError(
+        "limit-exceeded",
+        `${entry.path} is ${entry.size} bytes, above the Gateway per-file limit ${config.maxFileBytes}`,
+      );
+    }
+    treeBytes += entry.size;
+    if (treeBytes > config.maxTotalBytes) {
+      throw new NodeWorkspaceError(
+        "limit-exceeded",
+        `the node tree exceeds the Gateway byte limit ${config.maxTotalBytes}`,
+      );
+    }
+  }
   const deadline = Date.now() + config.timeoutMs;
   const localScan = await scanWorkspace({
     root: local.directory,
-    exclude: [...config.exclude, ...(input.exclude ?? []), RETURN_STAGING_PATTERN],
+    exclude: [...nodeExclude, RETURN_STAGING_PATTERN],
     symlinks: "skip",
     maxFiles: config.maxFiles,
     maxFileBytes: config.maxFileBytes,
@@ -157,10 +184,12 @@ export async function previewReturn(
     signal: input.signal,
     deadline,
   });
-  const baseManifest =
+  const markerManifest =
     tree.marker !== null && tree.marker.state === "complete" && tree.marker.manifest !== undefined
       ? tree.marker.manifest
       : undefined;
+  const stateManifest = await readReturnState(local.directory, remotePath);
+  const baseManifest = mergeBase(markerManifest, stateManifest);
   const plan = buildReturnPlan({
     nodeId,
     remotePath,
@@ -173,12 +202,119 @@ export async function previewReturn(
     localDirectories: new Set(localScan.directories),
     localSymlinks: new Set(localScan.skipped.filter((entry) => entry.reason === "symlink").map((entry) => entry.path)),
     include: input.include ?? [],
-    exclude: [...config.exclude, ...(input.exclude ?? [])],
+    exclude: nodeExclude,
   });
   return { plan, tree };
 }
 
 const RETURN_STAGING_PATTERN = "**/.nodews-return-*";
+const RETURN_STATE_FILE = ".nodews-return-state.json";
+const RETURN_STATE_MAX_BYTES = 4 * 1024 * 1024;
+const RETURN_STATE_MAX_BASES = 32;
+
+interface ReturnBaseState {
+  readonly treeDigest: string;
+  readonly files: readonly ManifestEntry[];
+  readonly updatedAt: string;
+}
+
+interface ReturnStateFile {
+  readonly version: 1;
+  readonly bases: Record<string, ReturnBaseState>;
+}
+
+/**
+ * Read the local record of the last returned node content for this remote path.
+ *
+ * This is a conflict baseline, not authority: an unreadable or malformed file
+ * is ignored and the publication marker is used instead.
+ */
+async function readReturnState(root: string, remotePath: string): Promise<readonly ManifestEntry[] | undefined> {
+  const statePath = path.join(root, RETURN_STATE_FILE);
+  try {
+    const stat = await fs.lstat(statePath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > RETURN_STATE_MAX_BYTES) return undefined;
+    const raw = JSON.parse(await fs.readFile(statePath, "utf8")) as Partial<ReturnStateFile>;
+    if (raw.version !== 1 || typeof raw.bases !== "object" || raw.bases === null) return undefined;
+    const entry = raw.bases[remotePath];
+    if (!entry || !Array.isArray(entry.files)) return undefined;
+    return entry.files.map((candidate) => {
+      const parsed = parseManifestEntry(candidate);
+      assertSafeRelativePath(parsed.path, "return state path");
+      return parsed;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record the node content this return reconciled, for the next preview. */
+async function writeReturnState(
+  root: string,
+  remotePath: string,
+  treeDigest: string,
+  files: readonly ManifestEntry[],
+): Promise<boolean> {
+  const statePath = path.join(root, RETURN_STATE_FILE);
+  try {
+    const existing = await fs.lstat(statePath).catch((error: unknown) => {
+      if (isErrno(error, "ENOENT")) return undefined;
+      throw error;
+    });
+    if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) return false;
+    let state: ReturnStateFile = { version: 1, bases: {} };
+    if (existing !== undefined) {
+      try {
+        const parsed = JSON.parse(await fs.readFile(statePath, "utf8")) as ReturnStateFile;
+        if (parsed.version === 1 && typeof parsed.bases === "object" && parsed.bases !== null) state = parsed;
+      } catch {
+        // A malformed state file is replaced by a fresh baseline.
+      }
+    }
+    const previous = state.bases[remotePath]?.files ?? [];
+    const merged = new Map(previous.map((entry) => [entry.path, entry]));
+    for (const entry of files) merged.set(entry.path, entry);
+    const bases: Record<string, ReturnBaseState> = {
+      ...state.bases,
+      [remotePath]: {
+        treeDigest,
+        files: [...merged.values()].sort((left, right) =>
+          Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)),
+        ),
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    const ordered = Object.entries(bases)
+      .sort((left, right) => right[1].updatedAt.localeCompare(left[1].updatedAt))
+      .slice(0, RETURN_STATE_MAX_BASES);
+    const body = JSON.stringify({ version: 1, bases: Object.fromEntries(ordered) }, null, 2) + "\n";
+    if (Buffer.byteLength(body, "utf8") > RETURN_STATE_MAX_BYTES) return false;
+    const temp = path.join(root, `.nodews-return-state-${randomUUID()}.tmp`);
+    const handle = await fs.open(temp, "wx", 0o600);
+    try {
+      await handle.writeFile(body, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temp, statePath);
+    await fsyncDirectory(root).catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function mergeBase(
+  marker: readonly ManifestEntry[] | undefined,
+  state: readonly ManifestEntry[] | undefined,
+): readonly ManifestEntry[] | undefined {
+  if (marker === undefined) return state;
+  if (state === undefined) return marker;
+  const merged = new Map(marker.map((entry) => [entry.path, entry]));
+  for (const entry of state) merged.set(entry.path, entry);
+  return [...merged.values()];
+}
 
 function targetPath(root: string, relativePath: string): string {
   return path.join(root, ...relativePath.split("/"));
@@ -321,7 +457,7 @@ async function applyStaged(
   plan: ReturnPlan,
   staged: ReadonlyMap<string, StagedFile>,
   stagingDirectory: string,
-): Promise<string[]> {
+): Promise<number> {
   await preflight(root, plan, staged);
   const applied: Applied[] = [];
   const createdDirectories: string[] = [];
@@ -374,7 +510,7 @@ async function applyStaged(
       applied.push({ kind: "modify", path: operation.path, backup });
       await fs.chmod(target, operation.executable ? 0o700 : 0o600);
     }
-    return [];
+    return applied.length;
   } catch (error) {
     const failures = await rollback(root, applied, createdDirectories);
     if (failures.length > 0) {
@@ -430,8 +566,36 @@ export async function applyReturn(
   const root = plan.localPath;
   const streamed = plan.operations.filter((entry) => entry.kind !== "chmod");
   const bytesTotal = streamed.reduce((total, entry) => total + entry.size, 0);
+  const nodeExclude = [...config.exclude, ...(input.exclude ?? []), RETURN_STATE_FILE];
+  const recordState = async (): Promise<boolean> => {
+    const selected = new Set<string>([...plan.unchanged, ...plan.operations.map((entry) => entry.path)]);
+    const files = preview.tree.files.filter((entry) => selected.has(entry.path));
+    return await writeReturnState(root, plan.remotePath, plan.treeDigest, files);
+  };
 
   if (plan.operations.length === 0) {
+    const createdDirectories: string[] = [];
+    try {
+      for (const relative of plan.directories) {
+        const directory = targetPath(root, relative);
+        try {
+          await fs.mkdir(directory, { mode: 0o700 });
+          createdDirectories.push(directory);
+        } catch (error) {
+          if (!isErrno(error, "EEXIST")) throw error;
+          const stat = await fs.lstat(directory);
+          if (stat.isSymbolicLink() || !stat.isDirectory()) {
+            throw new NodeWorkspaceError("local-conflict", `directory path is not a real directory: ${relative}`);
+          }
+        }
+      }
+    } catch (error) {
+      for (const directory of [...createdDirectories].reverse()) {
+        await fs.rmdir(directory).catch(() => undefined);
+      }
+      throw error;
+    }
+    const stateRecorded = await recordState();
     return {
       nodeId: plan.nodeId,
       localPath: root,
@@ -439,8 +603,9 @@ export async function applyReturn(
       planDigest: plan.planDigest,
       applied: plan.operations.map((entry) => ({ path: entry.path, kind: entry.kind })),
       unchanged: plan.counts.unchanged,
-      removedOnNode: plan.removed.map((entry) => entry.path),
+      removedOnNode: plan.nodeRemoved.map((entry) => entry.path),
       bytesTransferred: 0,
+      stateRecorded,
       durationMs: Date.now() - startedAt,
     };
   }
@@ -448,7 +613,7 @@ export async function applyReturn(
   const stagingDirectory = path.join(root, `.nodews-return-${randomUUID()}`);
   let session: FrameSession | undefined;
   const staged = new Map<string, StagedFile>();
-  let appliedModes: string[] = [];
+  let appliedCount = 0;
   try {
     await fs.mkdir(stagingDirectory, { mode: 0o700 });
     const channel = await transport.openDuplex({
@@ -465,6 +630,7 @@ export async function applyReturn(
       paths: streamed.map((entry) => entry.path),
       treeDigest: plan.treeDigest,
       planDigest: plan.planDigest,
+      exclude: nodeExclude,
     });
 
     for (;;) {
@@ -572,11 +738,8 @@ export async function applyReturn(
       bytesDone,
       bytesTotal,
     });
-    const failures = await applyStaged(root, plan, staged, stagingDirectory);
-    if (failures.length > 0) {
-      throw new NodeWorkspaceError("io", `applying the return failed: ${failures.join("; ")}`);
-    }
-    appliedModes = plan.operations.map((entry) => entry.path);
+    appliedCount = await applyStaged(root, plan, staged, stagingDirectory);
+    const stateRecorded = await recordState();
     const touchedDirectories = new Set<string>([root]);
     for (const operation of plan.operations) {
       touchedDirectories.add(path.dirname(targetPath(root, operation.path)));
@@ -591,8 +754,9 @@ export async function applyReturn(
       planDigest: plan.planDigest,
       applied: plan.operations.map((entry) => ({ path: entry.path, kind: entry.kind })),
       unchanged: plan.counts.unchanged,
-      removedOnNode: plan.removed.map((entry) => entry.path),
+      removedOnNode: plan.nodeRemoved.map((entry) => entry.path),
       bytesTransferred: bytesTotal,
+      stateRecorded,
       durationMs: Date.now() - startedAt,
     };
   } catch (error) {
@@ -613,7 +777,7 @@ export async function applyReturn(
       throw new NodeWorkspaceError(
         error.code,
         error.message,
-        { remotePath: plan.remotePath, planDigest: plan.planDigest, applied: appliedModes.length, ...error.details },
+        { remotePath: plan.remotePath, planDigest: plan.planDigest, applied: appliedCount, ...error.details },
         { cause: error },
       );
     }

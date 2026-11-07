@@ -406,13 +406,13 @@ const changesDetails = Type.Object(
         modeChanges: Type.Number(),
         unchanged: Type.Number(),
         conflicts: Type.Number(),
-        removed: Type.Number(),
+        nodeRemoved: Type.Number(),
       },
       { additionalProperties: false },
     ),
     operations: Type.Array(returnPlanEntry),
     conflicts: Type.Array(returnConflictEntry),
-    removed: Type.Array(Type.String()),
+    nodeRemoved: Type.Array(Type.String()),
     directories: Type.Array(Type.String()),
     truncated: Type.Boolean(),
   },
@@ -435,6 +435,7 @@ const returnDetails = Type.Object(
     unchanged: Type.Number(),
     removedOnNode: Type.Array(Type.String()),
     bytesTransferred: Type.Number(),
+    stateRecorded: Type.Boolean(),
     durationMs: Type.Number(),
   },
   { additionalProperties: false },
@@ -671,7 +672,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       label: "Preview a project tree return from a node",
       description:
         "Read-only preview of the files a paired node generated or changed in one directory, compared with a local project directory. " +
-        "Reports additions, safe modifications, mode changes, unchanged files, conflicts, and paths that exist only on the node. " +
+        "Reports additions, safe modifications, mode changes, unchanged files, conflicts, and paths removed on the node. " +
         "It never writes, overwrites, or deletes anything. Pass the returned planDigest to node_workspace_return to apply exactly this plan.",
       parameters: changesParameters,
       outputSchema: Type.Union([changesDetails, artifactFailure]),
@@ -708,11 +709,11 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           const truncated =
             plan.operations.length > MAX_REPORTED_PATHS ||
             plan.conflicts.length > MAX_REPORTED_PATHS ||
-            plan.removed.length > MAX_REPORTED_PATHS;
+            plan.nodeRemoved.length > MAX_REPORTED_PATHS;
           const counts = plan.counts;
           const summary =
             `${counts.additions} addition(s), ${counts.modifications} modification(s), ${counts.modeChanges} mode change(s), ` +
-            `${counts.unchanged} unchanged, ${counts.conflicts} conflict(s), ${counts.removed} path(s) only on the node.`;
+            `${counts.unchanged} unchanged, ${counts.conflicts} conflict(s), ${counts.nodeRemoved} path(s) removed on the node.`;
           const conflictText =
             counts.conflicts === 0
               ? "No conflicts."
@@ -721,9 +722,9 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   .map((entry) => `${entry.path} (${entry.reason})`)
                   .join(", ")}${plan.conflicts.length > 20 ? ", …" : ""}. Resolve them before applying.`;
           const removedText =
-            counts.removed === 0
+            counts.nodeRemoved === 0
               ? ""
-              : " Paths present only on the node are reported and never deleted locally.";
+              : " Paths removed on the node are reported and never deleted locally.";
           return {
             content: [
               {
@@ -748,7 +749,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               counts,
               operations,
               conflicts,
-              removed: plan.removed.slice(0, MAX_REPORTED_PATHS).map((entry) => entry.path),
+              nodeRemoved: plan.nodeRemoved.slice(0, MAX_REPORTED_PATHS).map((entry) => entry.path),
               directories: plan.directories.slice(0, MAX_REPORTED_PATHS),
               truncated,
             },
@@ -819,7 +820,10 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           const removedText =
             outcome.removedOnNode.length === 0
               ? ""
-              : ` ${outcome.removedOnNode.length} path(s) exist only on the node and were not deleted locally.`;
+              : ` ${outcome.removedOnNode.length} path(s) were removed on the node and were not deleted locally.`;
+          const stateText = outcome.stateRecorded
+            ? ""
+            : " The local return baseline could not be recorded; the next preview may report a conflict.";
           return {
             content: [
               {
@@ -828,6 +832,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   `Returned into ${outcome.localPath}: ${additions} added, ${modifications} modified, ${modes} mode change(s); ` +
                   `${outcome.unchanged} unchanged, ${outcome.bytesTransferred} bytes transferred.` +
                   removedText +
+                  stateText +
                   ` planDigest ${outcome.planDigest}.`,
               },
             ],
@@ -841,6 +846,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               unchanged: outcome.unchanged,
               removedOnNode: outcome.removedOnNode,
               bytesTransferred: outcome.bytesTransferred,
+              stateRecorded: outcome.stateRecorded,
               durationMs: outcome.durationMs,
             },
           };

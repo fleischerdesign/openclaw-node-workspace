@@ -22,6 +22,8 @@ export interface PushBase {
 
 export interface TreeRequest {
   readonly remotePath: string;
+  /** minimatch patterns the node applies before enforcing its limits. */
+  readonly exclude?: readonly string[];
 }
 
 /**
@@ -36,6 +38,8 @@ export interface ReturnHello {
   readonly paths: readonly string[];
   readonly treeDigest: string;
   readonly planDigest: string;
+  /** minimatch patterns used for the scan the treeDigest was computed from. */
+  readonly exclude?: readonly string[];
 }
 
 export interface PushHello {
@@ -199,6 +203,17 @@ export function parseReturnHello(value: unknown): ReturnHello {
   if (!/^[0-9a-f]{64}$/.test(planDigest)) {
     throw new NodeWorkspaceError("protocol", "hello.planDigest must be lowercase SHA-256 hex");
   }
+  const exclude: string[] = [];
+  if (value.exclude !== undefined) {
+    if (!Array.isArray(value.exclude) || value.exclude.length > 200) {
+      throw new NodeWorkspaceError("protocol", "hello.exclude must be an array of at most 200 patterns");
+    }
+    for (const pattern of value.exclude) {
+      const entry = requireString(pattern, "hello.exclude entry");
+      if (entry.length > 1024) throw new NodeWorkspaceError("protocol", "hello.exclude entry is too long");
+      exclude.push(entry);
+    }
+  }
   return {
     t: "hello",
     protocol: PROTOCOL_VERSION,
@@ -206,6 +221,7 @@ export function parseReturnHello(value: unknown): ReturnHello {
     paths,
     treeDigest,
     planDigest,
+    exclude,
   };
 }
 

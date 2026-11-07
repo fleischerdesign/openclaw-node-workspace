@@ -18,8 +18,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 84
-ℹ pass 84
+ℹ tests 92
+ℹ pass 92
 ℹ fail 0
 ```
 
@@ -99,6 +99,21 @@ The first review found defects that the original suite missed. Each now has a re
 | Failure schema did not match returned keys | TypeBox `Value.Check` on structured push failures in `test/entry.test.ts` |
 | Coded failures lacked operation context | `toolFailure preserves unknown-outcome as an actionable tool result` plus context fields in the failure schema |
 | Status verification and `parentExists` | `status reports verified content and drift after modification`, `status reports parentExists only for allowed paths` |
+
+## Review regressions
+
+The independent review of the incremental/return change produced these regression tests:
+
+| Finding | Test |
+| --- | --- |
+| A compromised node could return a traversal path | `a node tree path with a traversal segment is rejected on the Gateway` |
+| A node could return a digest that does not describe its manifest | `a node tree digest that does not match its manifest is rejected` |
+| A node tree file could omit its parent directory | `a node tree file without its declared parent directory is rejected` |
+| A second return of the same generated path became a permanent conflict | `a second return of the same generated path remains applicable` |
+| A local directory at an added file path failed late | `a local directory at an added path is a conflict, not a late overwrite` |
+| Empty generated directories were dropped | `an empty node directory is created on return` |
+| Exclude patterns could not rescue the node scan | `exclude patterns rescue a node scan before its limits apply` |
+| A local mode change was silently undone | `a local mode change is a conflict instead of being silently undone` |
 
 ## What is not proven
 

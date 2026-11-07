@@ -73,11 +73,12 @@ export async function readNodeTree(
   config: NodeConfig,
   remotePath: string,
   deadline: number,
+  exclude: readonly string[] = [],
 ): Promise<NodeTree> {
   const source = await resolveReturnSource(remotePath, config.returnRoots);
   const scan = await scanWorkspace({
     root: source.directory,
-    exclude: [MARKER_FILE],
+    exclude: [MARKER_FILE, ...exclude],
     symlinks: "reject",
     maxFiles: config.maxFiles,
     maxFileBytes: config.maxFileBytes,
@@ -135,6 +136,19 @@ export function treePayload(remotePath: string, tree: NodeTree): Record<string, 
   };
 }
 
+function parseExclude(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 200) {
+    throw new NodeWorkspaceError("protocol", "tree.exclude must be an array of at most 200 patterns");
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 1024) {
+      throw new NodeWorkspaceError("protocol", `tree.exclude[${index}] must be a non-empty string`);
+    }
+    return entry;
+  });
+}
+
 export async function handleTree(
   config: NodeConfig,
   paramsJSON: string | null | undefined,
@@ -153,7 +167,8 @@ export async function handleTree(
     throw new NodeWorkspaceError("protocol", "tree.remotePath must be a string");
   }
   const deadline = Date.now() + NODE_OPERATION_TIMEOUT_MS;
-  const tree = await readNodeTree(config, remotePath, deadline);
+  const exclude = parseExclude((raw as Record<string, unknown>).exclude);
+  const tree = await readNodeTree(config, remotePath, deadline, exclude);
   return JSON.stringify(treePayload(remotePath, tree));
 }
 
@@ -197,7 +212,7 @@ export async function handleReturn(
   try {
     const deadline = Date.now() + NODE_OPERATION_TIMEOUT_MS;
     const hello = parseReturnHello(await readControl(session, ["hello"], deadline));
-    const tree = await readNodeTree(config, hello.remotePath, deadline);
+    const tree = await readNodeTree(config, hello.remotePath, deadline, hello.exclude ?? []);
     if (tree.treeDigest !== hello.treeDigest) {
       throw new NodeWorkspaceError(
         "plan-stale",
@@ -261,20 +276,5 @@ export async function handleReturn(
     return JSON.stringify({ ok: false, code: failure.code });
   } finally {
     session.close();
-  }
-}
-
-/** Re-check a parent chain without following symlinks. */
-export async function assertNoSymlinkParents(root: string, relativePath: string): Promise<void> {
-  let current = root;
-  for (const segment of relativePath.split("/").slice(0, -1)) {
-    current = `${current}/${segment}`;
-    const stat = await fs.lstat(current);
-    if (stat.isSymbolicLink()) {
-      throw new NodeWorkspaceError("symlink-rejected", `parent became a symlink during return: ${relativePath}`);
-    }
-    if (!stat.isDirectory()) {
-      throw new NodeWorkspaceError("plan-stale", `parent is not a directory: ${relativePath}`);
-    }
   }
 }

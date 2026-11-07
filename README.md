@@ -24,7 +24,7 @@ deletes a local file because it disappeared on the node.
 | `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and claims a new destination with `mkdir(2)` before writing. Returns the canonical node id and the remote `cwd`. |
 | `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
 | `node_workspace_status` | Read-only check of a node destination: present or absent, whether this plugin published it, and whether the bytes still match the published manifest. |
-| `node_workspace_changes` | Read-only preview of a node directory against a local project: additions, safe modifications, mode changes, unchanged files, conflicts, and paths only on the node. Returns a `planDigest`. |
+| `node_workspace_changes` | Read-only preview of a node directory against a local project: additions, safe modifications, mode changes, unchanged files, conflicts, and paths removed on the node. Returns a `planDigest`. |
 | `node_workspace_return` | Applies one previewed plan. Requires the `planDigest`; a stale plan or any conflict aborts before writing. Streams into a private staging directory, verifies digests, then applies with exclusive creates, re-checked atomic replaces, rollback, and owner-only modes. Files removed on the node are reported, never deleted. |
 
 After a push the agent runs commands itself through the native `exec` tool with `host=node`. The
@@ -242,7 +242,9 @@ node_workspace_return(
 
 The preview writes nothing. Apply refuses a changed node tree, a changed local tree, or any local
 conflict. Additions are exclusive, modifications only replace a file that still matches the last
-published generation, and paths that exist only on the node are reported rather than deleted.
+return (or publication), and paths that were removed on the node are reported rather than deleted.
+A successful return records a 0600 baseline in `.nodews-return-state.json`, so the next
+generate-return cycle compares against what was actually returned.
 
 ## Failure semantics
 

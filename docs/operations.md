@@ -66,17 +66,25 @@ plugin never removes a generation; retire old paths yourself after verifying the
    read-only.
 3. Read the counts and conflicts. Resolve any conflict locally, then request a fresh preview: a
    conflict is never forced.
+   Use `exclude` for large generated directories (`node_modules`, build caches): the node applies the
+   same patterns before its limits, so an excluded subtree cannot fail the preview.
 4. Call `node_workspace_return` with the returned `planDigest`. A changed node tree or local tree is
    `plan-stale`; nothing is written.
-5. The result lists what was applied and which paths exist only on the node. Those paths are not
+5. The result lists what was applied and which paths were removed on the node. Those paths are not
    deleted locally.
+6. The Gateway records the reconciled node content in `.nodews-return-state.json` (0600) inside the
+   project. The next preview uses it as the conflict base, so generate-return-generate works without
+   re-publishing. If the file is missing or unreadable, the publication marker is used; a local file
+   that then differs from that older base is reported as a conflict rather than overwritten.
 
 Returned additions never replace an existing local file. A modification is allowed only when the
 local file still matches the last published generation; otherwise it is a conflict. A mode change
 is applied without transferring bytes. All returned files are owner-only.
 
 If a return is interrupted before the node's `end` frame, the staging directory is removed and no
-local file changes; retry the same previewed plan. If the process is killed during the short local
+local file changes; retry the same previewed plan. The staging directory is excluded from scans,
+but a killed process can leave one behind; inspect and remove it after confirming no return is
+running. If the process is killed during the short local
 apply window, inspect the project and request a fresh preview; a stale `.nodews-return-*` directory
 may remain and can be removed after confirming no return is running. The plugin does not delete it
 automatically.

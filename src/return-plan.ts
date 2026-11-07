@@ -42,7 +42,7 @@ export interface ReturnCounts {
   readonly modeChanges: number;
   readonly unchanged: number;
   readonly conflicts: number;
-  readonly removed: number;
+  readonly nodeRemoved: number;
 }
 
 export interface ReturnPlan {
@@ -54,7 +54,8 @@ export interface ReturnPlan {
   readonly operations: readonly ReturnOperation[];
   readonly conflicts: readonly ReturnConflict[];
   readonly unchanged: readonly string[];
-  readonly removed: readonly ReturnRemoval[];
+  /** Paths in the base publication that no longer exist on the node. */
+  readonly nodeRemoved: readonly ReturnRemoval[];
   /** Missing local directories the apply step will create. */
   readonly directories: readonly string[];
   readonly counts: ReturnCounts;
@@ -114,6 +115,10 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
 
   for (const entry of sortedByPath(input.nodeFiles)) {
     if (!selectedPath(entry.path, input.include, input.exclude)) continue;
+    if (input.localDirectories.has(entry.path)) {
+      conflicts.push({ path: entry.path, reason: "target-is-directory", nodeSha256: entry.sha256 });
+      continue;
+    }
     const local = input.localFiles.get(entry.path);
     if (local === undefined) {
       if (input.localSymlinks.has(entry.path)) {
@@ -127,10 +132,15 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
       operations.push({ kind: "add", path: entry.path, size: entry.size, sha256: entry.sha256, executable: entry.executable });
       continue;
     }
+    const previous = base.get(entry.path);
     if (local.size === entry.size && local.sha256 === entry.sha256) {
       if (local.executable === entry.executable) {
         unchanged.push(entry.path);
-      } else {
+      } else if (
+        previous !== undefined &&
+        previous.sha256 === local.sha256 &&
+        previous.executable === local.executable
+      ) {
         operations.push({
           kind: "chmod",
           path: entry.path,
@@ -138,10 +148,17 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
           sha256: entry.sha256,
           executable: entry.executable,
         });
+      } else {
+        conflicts.push({
+          path: entry.path,
+          reason: previous === undefined ? "no-base" : "local-modified",
+          localSha256: local.sha256,
+          ...(previous ? { baseSha256: previous.sha256 } : {}),
+          nodeSha256: entry.sha256,
+        });
       }
       continue;
     }
-    const previous = base.get(entry.path);
     if (previous === undefined) {
       conflicts.push({
         path: entry.path,
@@ -171,47 +188,57 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
     });
   }
 
-  // A new file needs its parent chain. Only chains that are absent locally are
-  // created; an existing file or symlink in that chain is a conflict.
+  // Create every selected node directory that is missing locally, plus the
+  // parent chain of every operation. A file or symlink in that chain is a
+  // conflict: the plugin never replaces it with a directory.
   const localEntries = new Set<string>([
     ...input.localFiles.keys(),
     ...input.localDirectories,
     ...input.localSymlinks,
   ]);
-  const directories = new Set<string>();
-  const conflictedParents = new Set<string>();
+  const neededDirectories = new Set<string>();
+  for (const directory of input.nodeDirectories) {
+    if (!selectedPath(directory, input.include, input.exclude)) continue;
+    const segments = directory.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      neededDirectories.add(segments.slice(0, index).join("/"));
+    }
+  }
   for (const operation of operations) {
     if (operation.kind === "chmod") continue;
     const segments = operation.path.split("/");
     for (let index = 1; index < segments.length; index += 1) {
-      const parent = segments.slice(0, index).join("/");
-      if (input.localDirectories.has(parent)) continue;
-      if (localEntries.has(parent)) {
-        if (!conflictedParents.has(operation.path)) {
-          conflicts.push({
-            path: operation.path,
-            reason: "parent-not-directory",
-            nodeSha256: operation.sha256,
-          });
-          conflictedParents.add(operation.path);
-        }
-        break;
-      }
-      directories.add(parent);
+      neededDirectories.add(segments.slice(0, index).join("/"));
     }
+  }
+  const directories = new Set<string>();
+  const conflictedDirectories = new Set<string>();
+  for (const directory of [...neededDirectories].sort((left, right) =>
+    left.split("/").length - right.split("/").length ||
+    Buffer.compare(Buffer.from(left), Buffer.from(right)),
+  )) {
+    if (input.localDirectories.has(directory)) continue;
+    if (localEntries.has(directory)) {
+      if (!conflictedDirectories.has(directory)) {
+        conflicts.push({ path: directory, reason: "parent-not-directory" });
+        conflictedDirectories.add(directory);
+      }
+      continue;
+    }
+    directories.add(directory);
   }
 
   const nodePaths = new Set(input.nodeFiles.map((entry) => entry.path));
-  const removed: ReturnRemoval[] = [];
-  for (const entry of sortedByPath([...input.localFiles.values()])) {
+  const nodeRemoved: ReturnRemoval[] = [];
+  for (const entry of sortedByPath([...base.values()])) {
     if (nodePaths.has(entry.path)) continue;
     if (!selectedPath(entry.path, input.include, input.exclude)) continue;
-    removed.push({ path: entry.path, size: entry.size, sha256: entry.sha256 });
+    nodeRemoved.push({ path: entry.path, size: entry.size, sha256: entry.sha256 });
   }
 
   const sortedOperations = sortedByPath(operations);
   const sortedConflicts = sortedByPath(conflicts);
-  const sortedRemoved = sortedByPath(removed);
+  const sortedRemoved = sortedByPath(nodeRemoved);
   const sortedDirectories = [...directories].sort((left, right) =>
     Buffer.compare(Buffer.from(left), Buffer.from(right)),
   );
@@ -223,7 +250,7 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
       treeDigest: input.treeDigest,
       operations: sortedOperations,
       conflicts: sortedConflicts,
-      removed: sortedRemoved,
+      nodeRemoved: sortedRemoved,
       directories: sortedDirectories,
     }),
   );
@@ -236,7 +263,7 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
     operations: sortedOperations,
     conflicts: sortedConflicts,
     unchanged: [...unchanged].sort(),
-    removed: sortedRemoved,
+    nodeRemoved: sortedRemoved,
     directories: sortedDirectories,
     counts: {
       additions: sortedOperations.filter((entry) => entry.kind === "add").length,
@@ -244,7 +271,7 @@ export function buildReturnPlan(input: PlanInput): ReturnPlan {
       modeChanges: sortedOperations.filter((entry) => entry.kind === "chmod").length,
       unchanged: unchanged.length,
       conflicts: sortedConflicts.length,
-      removed: sortedRemoved.length,
+      nodeRemoved: sortedRemoved.length,
     },
   };
 }

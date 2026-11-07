@@ -7,6 +7,9 @@
   creates only below `node.pushRoots`; a node artifact reads only inside `node.artifactRoots`; a node
   tree or return reads only inside `node.returnRoots`. Roots are resolved with `realpath`; an empty
   list denies the operation.
+- **The return base is local state, not a node claim.** The last successful return writes
+  `.nodews-return-state.json` (0600) in the project with the node content it reconciled. A missing or
+  malformed file falls back to the publication marker; neither grants an overwrite by itself.
 - **A return is a previewed, conflict-checked plan.** `node_workspace_return` requires the
   `planDigest` from `node_workspace_changes` and re-derives the plan. A changed node tree or local
   tree is `plan-stale`; any local modification since the published base is `local-conflict`. Nothing
@@ -36,7 +39,10 @@
   may not use the reserved marker name. Absolute paths, `..`, empty segments, and backslashes are
   rejected on both sides.
 - **Independent verification.** The Gateway hashes what it sends; the node hashes what it receives
-  and re-hashes the staged files before publication; the tree digest is recomputed on the node. The
+  and re-hashes the staged files before publication; the tree digest is recomputed on the node. A
+  return is validated on the Gateway too: every path is component-checked, duplicates and missing
+  parents are rejected, and the tree digest is recomputed from the received manifest before a plan
+  is built or a byte is written. The
   artifact path is verified in both directions before the local file is created.
 - **Exclusive artifact creation.** The Gateway destination is created with `link()` (or
   `COPYFILE_EXCL`), never by writing over an existing file. A concurrent creator wins and the fetch

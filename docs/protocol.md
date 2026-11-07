@@ -102,8 +102,10 @@ requires the announced size, and compares the digest. The destination appears on
 
 ## Tree: node directory manifest
 
-`nodews.tree` is a unary command. Parameters `{ remotePath }`. The directory must exist, be a real
-directory inside `node.returnRoots`, and contain no symlink or special file. The response is JSON:
+`nodews.tree` is a unary command. Parameters `{ remotePath, exclude? }`. The directory must exist, be
+a real directory inside `node.returnRoots`, and contain no symlink or special file. `exclude` is an
+optional array of minimatch patterns applied before the node's limits; the Gateway sends the same
+list and re-applies it locally. The response is JSON:
 
 ```
 { ok: true, remotePath, directory, files[], directories[], totalBytes, treeDigest,
@@ -111,7 +113,10 @@ directory inside `node.returnRoots`, and contain no symlink or special file. The
 ```
 
 `files` uses the manifest entry shape. `marker` is the plugin marker or `null`; `verified` is true
-only when the live scan matches the marker manifest byte for byte. A changed generated tree is
+only when the live scan matches the marker manifest byte for byte. The Gateway validates every
+returned path independently, re-derives the tree digest from the received manifest, and rejects a
+path with a traversal segment, a duplicate, a missing parent directory, or a digest that does not
+match. A compromised node therefore cannot redirect a return outside `gateway.returnRoots`. A changed generated tree is
 normally `verified: false` while its marker still supplies the base manifest for conflict decisions.
 This command is read-only and bounded by the node limits.
 
@@ -121,7 +126,7 @@ This command is read-only and bounded by the node limits.
 
 | Message | Direction | Fields |
 | --- | --- | --- |
-| `hello` | G→N | `protocol: 3`, `remotePath`, `paths[]`, `treeDigest`, `planDigest` |
+| `hello` | G→N | `protocol: 3`, `remotePath`, `paths[]`, `treeDigest`, `planDigest`, `exclude[]` |
 | `accepted` | N→G | `treeDigest` |
 | `file` | N→G | `path`, `size`, `sha256`, `executable` |
 | *data frames* | N→G | exactly the announced bytes |
@@ -129,7 +134,8 @@ This command is read-only and bounded by the node limits.
 | `rejected` | N→G | `code`, `message`, before acceptance |
 | `return-error` | N→G | `code`, `message`, after acceptance |
 
-`paths` must be unique, sorted in byte order, and present in the freshly scanned tree. The node
+`paths` must be unique, sorted in byte order, and present in the freshly scanned tree. `exclude`
+must match the list used by `nodews.tree`; the node applies it before recomputing `treeDigest`. The node
 re-scans before accepting: a `treeDigest` that differs from the preview fails with `plan-stale`.
 Each file is hashed while streaming; a file that changes during the read fails the transfer. The
 node never writes, renames, or deletes anything.

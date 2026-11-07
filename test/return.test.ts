@@ -95,7 +95,7 @@ test("a return preview reports additions, safe modifications, mode changes and r
   assert.equal(preview.plan.counts.modifications, 1);
   assert.equal(preview.plan.counts.modeChanges, 1);
   assert.equal(preview.plan.counts.conflicts, 0);
-  assert.deepEqual(preview.plan.removed.map((entry) => entry.path), ["old.txt"]);
+  assert.deepEqual(preview.plan.nodeRemoved.map((entry) => entry.path), ["old.txt"]);
   assert.match(preview.plan.planDigest, /^[0-9a-f]{64}$/);
   // Read-only: the local project is untouched.
   assert.equal(await fs.readFile(path.join(sourceRoot, "src/a.txt"), "utf8"), "alpha");
@@ -115,7 +115,9 @@ test("a return preview reports additions, safe modifications, mode changes and r
   assert.equal((await fs.stat(path.join(sourceRoot, "src/b.txt"))).mode & 0o777, 0o700);
   assert.equal(await fs.readFile(path.join(sourceRoot, "old.txt"), "utf8"), "old");
   assert.deepEqual(outcome.removedOnNode, ["old.txt"]);
-  const leftovers = (await fs.readdir(sourceRoot)).filter((name) => name.startsWith(".nodews-return-"));
+  const leftovers = (await fs.readdir(sourceRoot)).filter(
+    (name) => name.startsWith(".nodews-return-") && name !== ".nodews-return-state.json",
+  );
   assert.deepEqual(leftovers, []);
 });
 
@@ -171,11 +173,11 @@ test("a mode-only change is applied without transferring bytes", async () => {
   assert.equal((await fs.stat(path.join(sourceRoot, "run.sh"))).mode & 0o777, 0o700);
 });
 
-test("a local file added after the preview makes the plan stale", async () => {
+test("a local file changed after the preview makes the plan stale", async () => {
   const { sourceRoot, remotePath, config, harness } = await published({ "a.txt": "alpha" });
   await fs.writeFile(path.join(remotePath, "a.txt"), "node version");
   const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
-  await fs.writeFile(path.join(sourceRoot, "local-only.txt"), "appeared");
+  await fs.writeFile(path.join(sourceRoot, "a.txt"), "local edit after preview");
   await assert.rejects(
     () =>
       applyReturn(harness.transport, config.gateway, {
@@ -185,7 +187,7 @@ test("a local file added after the preview makes the plan stale", async () => {
       }),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "plan-stale",
   );
-  assert.equal(await fs.readFile(path.join(sourceRoot, "a.txt"), "utf8"), "alpha");
+  assert.equal(await fs.readFile(path.join(sourceRoot, "a.txt"), "utf8"), "local edit after preview");
 });
 
 test("a generated file never overwrites an unrelated local file without a base", async () => {
@@ -225,7 +227,9 @@ test("a disconnect while receiving leaves no local change and no staging directo
     }),
   );
   assert.equal(await fs.readFile(path.join(sourceRoot, "big.bin"), "utf8"), "seed");
-  const leftovers = (await fs.readdir(sourceRoot)).filter((name) => name.startsWith(".nodews-return-"));
+  const leftovers = (await fs.readdir(sourceRoot)).filter(
+    (name) => name.startsWith(".nodews-return-") && name !== ".nodews-return-state.json",
+  );
   assert.deepEqual(leftovers, []);
 });
 
@@ -236,4 +240,101 @@ test("local and node paths are constrained by their configured roots", async () 
     () => previewReturn(harness.transport, config.gateway, previewInput(outside, destinationRoot)),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "path-outside-root",
   );
+});
+
+test("a second return of the same generated path remains applicable", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "gen.txt": "v0" });
+  await fs.writeFile(path.join(remotePath, "gen.txt"), "v1");
+  const first = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  await applyReturn(harness.transport, config.gateway, {
+    ...previewInput(sourceRoot, remotePath),
+    planDigest: first.plan.planDigest,
+    progress: undefined,
+  });
+  assert.equal(await fs.readFile(path.join(sourceRoot, "gen.txt"), "utf8"), "v1");
+
+  await fs.writeFile(path.join(remotePath, "gen.txt"), "v2");
+  const second = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(second.plan.counts.conflicts, 0);
+  assert.equal(second.plan.counts.modifications, 1);
+  await applyReturn(harness.transport, config.gateway, {
+    ...previewInput(sourceRoot, remotePath),
+    planDigest: second.plan.planDigest,
+    progress: undefined,
+  });
+  assert.equal(await fs.readFile(path.join(sourceRoot, "gen.txt"), "utf8"), "v2");
+
+  const settled = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(settled.plan.operations.length, 0);
+  assert.equal(settled.plan.counts.nodeRemoved, 0);
+});
+
+test("a local directory at an added path is a conflict, not a late overwrite", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "a.txt": "alpha" });
+  await fs.writeFile(path.join(remotePath, "tree"), "node file");
+  await fs.mkdir(path.join(sourceRoot, "tree"));
+  const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(preview.plan.counts.conflicts, 1);
+  assert.equal(preview.plan.conflicts[0]?.reason, "target-is-directory");
+});
+
+test("an empty node directory is created on return", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "a.txt": "alpha" });
+  await fs.mkdir(path.join(remotePath, "empty"));
+  const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.deepEqual(preview.plan.directories, ["empty"]);
+  await applyReturn(harness.transport, config.gateway, {
+    ...previewInput(sourceRoot, remotePath),
+    planDigest: preview.plan.planDigest,
+    progress: undefined,
+  });
+  assert.equal((await fs.stat(path.join(sourceRoot, "empty"))).isDirectory(), true);
+});
+
+test("exclude patterns rescue a node scan before its limits apply", async () => {
+  const { sourceRoot, destinationRoot, artifactRoot } = await setup({ "keep.txt": "keep" });
+  const remote = path.join(destinationRoot, "bulk");
+  await fs.mkdir(path.join(remote, "bulk"), { recursive: true });
+  for (let index = 0; index < 120; index += 1) {
+    await fs.writeFile(path.join(remote, "bulk", `f${index}.txt`), "x");
+  }
+  const raw = {
+    gateway: {
+      localRoots: [sourceRoot],
+      artifactRoots: [artifactRoot],
+      returnRoots: [sourceRoot],
+      exclude: ["bulk"],
+      timeoutMs: 20_000,
+      maxFiles: 50,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+    node: {
+      pushRoots: [destinationRoot],
+      artifactRoots: [artifactRoot],
+      returnRoots: [destinationRoot],
+      maxFiles: 50,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+  };
+  // Reuse the harness's commands are bound to the previous config; build a new
+  // pair for this isolated limit case.
+  const { createNodeCommands: makeCommands } = await import("../src/node/commands.js");
+  const commands = makeCommands(raw);
+  const limited = createHarness(commands.commands);
+  const config = resolvePluginConfig(raw);
+  const preview = await previewReturn(limited.transport, config.gateway, previewInput(sourceRoot, remote));
+  assert.equal(preview.plan.counts.additions, 0);
+  assert.equal(preview.plan.operations.length, 0);
+});
+
+test("a local mode change is a conflict instead of being silently undone", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "run.sh": "#!/bin/sh\n" });
+  await fs.chmod(path.join(sourceRoot, "run.sh"), 0o755);
+  await fs.chmod(path.join(remotePath, "run.sh"), 0o600);
+  const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(preview.plan.counts.conflicts, 1);
+  assert.equal(preview.plan.conflicts[0]?.reason, "local-modified");
+  assert.equal((await fs.stat(path.join(sourceRoot, "run.sh"))).mode & 0o777, 0o755);
 });

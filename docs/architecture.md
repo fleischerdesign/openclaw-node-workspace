@@ -109,11 +109,13 @@ A return reads a node directory and writes only the local changes an explicit pl
 2. **Scan the local project.** The Gateway scans the local target inside `gateway.returnRoots` with
    the same limits, skipping symlinks and excluding the caller's patterns. It never writes.
 3. **Build a plan.** For every selected node file: absent locally is an addition; identical is
-   unchanged; a different executable bit alone is a mode change; different content is a safe
-   modification only when the local content still matches the base manifest written by the last
-   publication. Everything else is a conflict. Local files absent on the node are reported as
-   removals and are never deleted. The plan digest covers every operation, conflict, removal, the
-   node tree digest, and both paths.
+   unchanged; a different executable bit alone is a mode change when the local mode still matches
+   the base; different content is a safe modification only when the local content still matches the
+   base. The base is the local return record from the last successful return for this remote path,
+   overlaid on the publication marker, so a second generation can be returned. Everything else is a
+   conflict. Paths that were in the base but no longer exist on the node are reported as
+   `nodeRemoved` and are never deleted. The plan digest covers every operation, conflict,
+   nodeRemoved entry, directory, the node tree digest, and both paths.
 4. **Re-derive and pin.** `node_workspace_return` requires the plan digest. It re-runs the preview;
    a different digest is `plan-stale` and nothing is written. Conflicts are `local-conflict`.
 5. **Stage and verify.** The node re-scans its tree and refuses a tree digest that changed since the
@@ -125,8 +127,12 @@ A return reads a node directory and writes only the local changes an explicit pl
    a real directory. Additions use an exclusive link or copy; modifications copy the current file to
    a staging backup, re-check its digest, then rename the staged file over it atomically. A failure
    restores backups, removes files this call created, and removes created empty directories.
-7. **Report.** The result lists applied paths, the unchanged count, and the paths that exist only on
-   the node. It never deletes a local file and never modifies the node tree.
+7. **Record and report.** On success the Gateway writes `.nodews-return-state.json` in the local
+   project (0600) with the node content it reconciled; the next preview uses that record as the
+   conflict base. A failed write does not undo the applied files; the result reports
+   `stateRecorded: false`. The result lists applied paths, the unchanged count, missing directories
+   created, and the paths removed on the node. It never deletes a local file and never modifies the
+   node tree.
 
 ## Artifact lifecycle
 

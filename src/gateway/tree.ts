@@ -1,7 +1,7 @@
 import type { GatewayConfig } from "../config.js";
-import type { ManifestEntry } from "../digest.js";
+import { treeDigest, type ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
-import { normalizeAbsolutePosixPath } from "../paths.js";
+import { assertSafeRelativePath, normalizeAbsolutePosixPath } from "../paths.js";
 import { parseManifestEntry, COMMAND_TREE } from "../protocol.js";
 import { resolveNodeId, type NodeTransport } from "../transport.js";
 import type { Marker } from "../node/fs-atomic.js";
@@ -53,7 +53,12 @@ function parseEnvelope(raw: unknown): Record<string, unknown> {
 export async function readNodeTree(
   transport: NodeTransport,
   config: GatewayConfig,
-  input: { node: string; remotePath: string; signal?: AbortSignal | undefined },
+  input: {
+    node: string;
+    remotePath: string;
+    exclude?: readonly string[] | undefined;
+    signal?: AbortSignal | undefined;
+  },
 ): Promise<NodeTreeOutcome> {
   const nodeId = await resolveNodeId(transport, input.node);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
@@ -62,7 +67,7 @@ export async function readNodeTree(
     raw = await transport.invoke({
       nodeId,
       command: COMMAND_TREE,
-      params: { remotePath },
+      params: { remotePath, ...(input.exclude ? { exclude: [...input.exclude] } : {}) },
       timeoutMs: config.timeoutMs,
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -75,18 +80,56 @@ export async function readNodeTree(
     throw new NodeWorkspaceError("protocol", "node tree response is missing its manifest");
   }
   const files = value.files.map(parseManifestEntry);
+  for (const entry of files) assertSafeRelativePath(entry.path, "node tree file");
   const directories: string[] = [];
+  const seen = new Set<string>();
   for (const entry of value.directories) {
     if (typeof entry !== "string" || entry.length === 0) {
       throw new NodeWorkspaceError("protocol", "node tree response has an invalid directory entry");
     }
+    assertSafeRelativePath(entry, "node tree directory");
+    if (seen.has(entry)) throw new NodeWorkspaceError("protocol", `node tree repeats ${entry}`);
+    seen.add(entry);
     directories.push(entry);
+  }
+  for (const directory of directories) {
+    const segments = directory.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      const parent = segments.slice(0, index).join("/");
+      if (!seen.has(parent)) {
+        throw new NodeWorkspaceError("protocol", `node tree is missing directory ${parent} for ${directory}`);
+      }
+    }
+  }
+  const filePaths = new Set<string>();
+  let summedBytes = 0;
+  for (const entry of files) {
+    if (filePaths.has(entry.path)) throw new NodeWorkspaceError("protocol", `node tree repeats ${entry.path}`);
+    if (seen.has(entry.path)) {
+      throw new NodeWorkspaceError("protocol", `node tree uses ${entry.path} as both file and directory`);
+    }
+    filePaths.add(entry.path);
+    const segments = entry.path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      const parent = segments.slice(0, index).join("/");
+      if (!seen.has(parent)) {
+        throw new NodeWorkspaceError("protocol", `node tree is missing directory ${parent} for ${entry.path}`);
+      }
+    }
+    summedBytes += entry.size;
   }
   if (typeof value.treeDigest !== "string" || !/^[0-9a-f]{64}$/.test(value.treeDigest)) {
     throw new NodeWorkspaceError("protocol", "node tree response is missing a valid treeDigest");
   }
   if (typeof value.totalBytes !== "number" || !Number.isSafeInteger(value.totalBytes) || value.totalBytes < 0) {
     throw new NodeWorkspaceError("protocol", "node tree response has an invalid totalBytes");
+  }
+  if (value.totalBytes !== summedBytes) {
+    throw new NodeWorkspaceError("protocol", "node tree totalBytes does not match its manifest");
+  }
+  const recomputed = treeDigest({ version: 1, files, directories });
+  if (recomputed !== value.treeDigest) {
+    throw new NodeWorkspaceError("integrity", "node tree digest does not match its manifest");
   }
   if (typeof value.directory !== "string") {
     throw new NodeWorkspaceError("protocol", "node tree response is missing its directory");
