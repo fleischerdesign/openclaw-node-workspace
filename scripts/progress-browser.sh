@@ -130,6 +130,17 @@ npm run build >/dev/null
 npm pack --pack-destination "$WORK" >/dev/null
 TARBALL="$(ls "$WORK"/*.tgz)"
 
+CONTROL_UI_ENTRY="$(node -e 'const manifest=require("./openclaw.plugin.json"); const entry=manifest.controlUi?.entry; if(typeof entry!=="string"||!entry) process.exit(2); console.log(entry)')"
+tar -tzf "$TARBALL" | grep -qx "package/$CONTROL_UI_ENTRY" || {
+  echo "FAIL: the packed plugin does not contain controlUi.entry $CONTROL_UI_ENTRY" >&2
+  exit 1
+}
+tar -tzf "$TARBALL" | grep -qx "package/dist/index.js" || {
+  echo "FAIL: the packed plugin does not contain its runtime entry" >&2
+  exit 1
+}
+echo "tarball carries $CONTROL_UI_ENTRY"
+
 mkdir -p "$WORK/gateway/home" "$WORK/gateway/state" "$WORK/node/home" "$WORK/node/state"
 mkdir -p "$WORK/gateway-root/src" "$WORK/gateway-root/artifacts" "$WORK/node-root"
 mkdir -p "$WORK/tmp-gateway" "$WORK/tmp-node" "$EVIDENCE"

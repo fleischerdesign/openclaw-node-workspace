@@ -19,7 +19,7 @@ export interface ToolDependencies {
   /** Session-scoped measured progress registry. */
   readonly progress?: TransferProgressStore;
   /** Wake feature subscribers after the registry changed. */
-  readonly onProgressChange?: () => void;
+  readonly onProgressChange?: (terminal?: boolean) => void;
 }
 
 export interface AgentUpdate {
@@ -333,7 +333,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           });
           tracked?.store.finish(tracked.scope, transferId, "completed");
           settled = true;
-          deps.onProgressChange?.();
+          deps.onProgressChange?.(true);
           const mib = (outcome.bytes / (1024 * 1024)).toFixed(2);
           const verb = outcome.status === "already-applied" ? "already present" : "published";
           const skippedNote =
@@ -376,7 +376,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   ? "cancelled"
                   : "failed";
             tracked?.store.finish(tracked.scope, transferId, state);
-            deps.onProgressChange?.();
+            deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_push", error, context);
         }
@@ -427,7 +427,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           });
           tracked?.store.finish(tracked.scope, transferId, "completed");
           settled = true;
-          deps.onProgressChange?.();
+          deps.onProgressChange?.(true);
           return {
             content: [
               {
@@ -453,7 +453,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   ? "cancelled"
                   : "failed";
             tracked?.store.finish(tracked.scope, transferId, state);
-            deps.onProgressChange?.();
+            deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_artifact", error, context);
         }

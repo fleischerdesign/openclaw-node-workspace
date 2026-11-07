@@ -3,6 +3,7 @@ import type { OpenClawPluginGatewayEvents, PluginJsonValue } from "openclaw/plug
 
 import { resolvePluginConfig } from "./config.js";
 import { errorMessage } from "./errors.js";
+import { ProgressEventCoalescer } from "./gateway/progress-events.js";
 import { TransferProgressStore, type TransferScope } from "./gateway/progress-store.js";
 import { createNodeTransport } from "./gateway/transport.js";
 import { createTools } from "./gateway/tools.js";
@@ -30,14 +31,18 @@ export default definePluginEntry({
     const progress = new TransferProgressStore();
     let events: Pick<OpenClawPluginGatewayEvents, "emit"> | undefined;
     let disposeSessions: (() => void) | undefined;
+    let pruneTimer: ReturnType<typeof setInterval> | undefined;
 
-    const notify = (): void => {
+    // Progress callbacks arrive every ~150 ms per transfer. Coalesce the
+    // broadcast while keeping the first event and every terminal event prompt.
+    const notifier = new ProgressEventCoalescer(() => {
       try {
         events?.emit("progress-changed", {}, { scope: "operator.read" });
       } catch {
         // The service is not started during discovery; there is no subscriber yet.
       }
-    };
+    });
+    const notify = (terminal = false): void => notifier.notify(terminal);
 
     // One implementation serves the agent tool and the Control UI accessory.
     // The session key and agent id come from the host, not from tool arguments.
@@ -50,8 +55,11 @@ export default definePluginEntry({
         if (!context.sessionKey) {
           return { ok: false, error: "session-scope-required", code: "session-scope-required" };
         }
-        if (context.agentId && context.client?.allowsAgent && !context.client.allowsAgent(context.agentId)) {
-          return { ok: false, error: "session-scope-forbidden", code: "session-scope-forbidden" };
+        if (context.agentId && context.client) {
+          const allows = context.client.allowsAgent;
+          if (typeof allows !== "function" || !allows(context.agentId)) {
+            return { ok: false, error: "session-scope-forbidden", code: "session-scope-forbidden" };
+          }
         }
         const scope: TransferScope = {
           sessionKey: context.sessionKey,
@@ -68,6 +76,8 @@ export default definePluginEntry({
       id: `${PLUGIN_ID}:progress-events`,
       start(context) {
         events = context.gatewayEvents;
+        pruneTimer = setInterval(() => progress.prune(), 60_000);
+        (pruneTimer as { unref?: () => void }).unref?.();
         disposeSessions = context.gatewayEvents?.onSessionsChanged((event) => {
           if (!event.sessionKey) return;
           if (!/reset|delete|remove|new/iu.test(event.reason ?? "")) return;
@@ -75,12 +85,15 @@ export default definePluginEntry({
             sessionKey: event.sessionKey,
             ...(event.agentId ? { agentId: event.agentId } : {}),
           };
-          if (progress.clearScope(scope)) notify();
+          if (progress.clearScope(scope)) notify(true);
         });
       },
       stop() {
         disposeSessions?.();
         disposeSessions = undefined;
+        if (pruneTimer !== undefined) clearInterval(pruneTimer);
+        pruneTimer = undefined;
+        notifier.dispose();
         events = undefined;
       },
     });

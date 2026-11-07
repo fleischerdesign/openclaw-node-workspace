@@ -54,6 +54,7 @@ export class TransferProgressStore {
   }
 
   begin(scope: TransferScope, transferId: string, kind: TransferKind): void {
+    this.prune();
     const now = this.#clock();
     const key = scopeKey(scope);
     let entries = this.#scopes.get(key);
