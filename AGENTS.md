@@ -11,7 +11,8 @@ npm test                 # node:test through tsx; unit + in-process transport
 npm run build            # tsc to dist/ (the plugin runtime entry)
 npm pack                 # the install shape users get
 bash scripts/pack-and-inspect.sh       # real loader, disposable state under /tmp
-bash scripts/integration-isolated.sh   # disposable Gateway + node host, port 19789
+bash scripts/integration-isolated.sh   # disposable Gateway + node host, free port
+bash scripts/e2e-model-driven.sh       # same pair, plus one model-driven agent turn
 ```
 
 The two scripts must never see the live state. They set `HOME`, `OPENCLAW_STATE_DIR`,
@@ -43,3 +44,7 @@ for the child process. Keep that property if you edit them.
 
 An assertion belongs at the lowest layer that can decide it. Do not add a grep test for a string the
 generator just wrote.
+
+`e2e-model-driven.sh` is the top layer: a scripted OpenAI-compatible endpoint
+(`model-stub.mjs`) drives a real agent turn through the Gateway. The model is a test double; the
+agent loop, tool dispatch, node transport, node exec, and artifact bytes are real.

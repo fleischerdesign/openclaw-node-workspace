@@ -211,12 +211,15 @@ npm run typecheck
 npm test                 # unit + in-process transport tests
 npm run build
 bash scripts/pack-and-inspect.sh        # real plugin loader, isolated disposable state
-bash scripts/integration-isolated.sh    # isolated Gateway + node host on port 19789
+bash scripts/integration-isolated.sh    # isolated Gateway + node host on a free port
+bash scripts/e2e-model-driven.sh        # scripted model turns the real agent tool path
 ```
 
 The integration scripts refuse to use the live state directory: they set
 `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, and `HOME` under a temporary directory and clear
-`OPENCLAW_NIX_MODE` only for that disposable process.
+`OPENCLAW_NIX_MODE` only for that disposable process. `e2e-model-driven.sh` additionally serves an
+OpenAI-compatible endpoint whose decisions are a fixed script (`scripts/model-stub.mjs`); that
+stub is a test double for the model, not a model.
 
 ## Documentation
 
