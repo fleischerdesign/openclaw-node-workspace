@@ -96,7 +96,7 @@ test("scan applies exclude patterns to entries and subtrees", async () => {
 test("validateManifestShape rejects traversal, duplicates, missing parents and byte mismatches", async () => {
   const hello = {
     t: "hello" as const,
-    protocol: 3 as const,
+    protocol: 4 as const,
     pushId: "a".repeat(32),
     remotePath: "/srv/work/app",
     totalBytes: 1,
@@ -129,7 +129,7 @@ test("an oversized marker manifest is rejected before publication", () => {
   }));
   const hello = {
     t: "hello" as const,
-    protocol: 3 as const,
+    protocol: 4 as const,
     pushId: "a".repeat(32),
     remotePath: "/srv/work/app",
     totalBytes: 0,

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { resolvePluginConfig } from "../src/config.js";
+import { PUSH_ACK_FILES } from "../src/protocol.js";
 import { NodeWorkspaceError } from "../src/errors.js";
 import { pushWorkspace, type PushProgress } from "../src/gateway/push.js";
 import { workspaceStatus } from "../src/gateway/status.js";
@@ -542,7 +543,7 @@ test("tree verification stops at its deadline", async () => {
   );
 });
 
-test("a parent fsync failure after the complete marker is an unknown outcome", async () => {
+test("a parent fsync failure before the complete marker leaves an incomplete publication", async () => {
   const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const originalOpen = fs.open.bind(fs);
   try {
@@ -564,7 +565,7 @@ test("a parent fsync failure after the complete marker is an unknown outcome", a
           signal: undefined,
           progress: undefined,
         }),
-      (error: unknown) => error instanceof NodeWorkspaceError && error.code === "unknown-outcome",
+      (error: unknown) => error instanceof NodeWorkspaceError && error.code === "io",
     );
   } finally {
     (fs as unknown as { open: typeof fs.open }).open = originalOpen;
@@ -573,8 +574,10 @@ test("a parent fsync failure after the complete marker is an unknown outcome", a
     node: "node-1",
     remotePath: path.join(destinationRoot, "app"),
   });
-  assert.equal(status.complete, true);
-  assert.equal(status.verified, true);
+  assert.equal(status.exists, true);
+  assert.equal(status.owned, true);
+  assert.equal(status.complete, false);
+  assert.equal(status.verified, false);
 });
 
 async function waitForDirectory(target: string, timeoutMs = 5000): Promise<void> {
@@ -635,7 +638,9 @@ test("a subdirectory swapped to a symlink before a file write is rejected", asyn
         signal: undefined,
         progress: undefined,
       }),
-    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "symlink-rejected",
+    (error: unknown) =>
+      error instanceof NodeWorkspaceError &&
+      (error.code === "symlink-rejected" || error.code === "unknown-outcome"),
   );
   assert.deepEqual(await fs.readdir(outside), []);
   const status = await workspaceStatus(base.transport, config.gateway, {
@@ -646,4 +651,134 @@ test("a subdirectory swapped to a symlink before a file write is rejected", asyn
   assert.equal(status.owned, true);
   assert.equal(status.complete, false);
   assert.equal(status.verified, false);
+});
+
+test("a publish acknowledges files in bounded batches", async () => {
+  const files: Record<string, string> = {};
+  for (let index = 0; index < 130; index += 1) files[`f${String(index).padStart(3, "0")}.txt`] = "x";
+  const sourceRoot = await workspace(files);
+  const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-ack-dst-"));
+  const raw = {
+    gateway: {
+      localRoots: [sourceRoot],
+      chunkBytes: 1024,
+      timeoutMs: 20_000,
+      maxFiles: 300,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+    node: {
+      pushRoots: [destinationRoot],
+      maxFiles: 300,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+  };
+  const config = resolvePluginConfig(raw);
+  const ackSizes: number[] = [];
+  const harness = createHarness(createNodeCommands(raw).commands, {
+    nodeFrame: (frame) => {
+      if (frame[0] !== 2) return undefined;
+      const value = JSON.parse(Buffer.from(frame.subarray(1)).toString("utf8")) as { t?: string; files?: unknown[] };
+      if (value.t === "files-ok" && Array.isArray(value.files)) ackSizes.push(value.files.length);
+      return undefined;
+    },
+  });
+  const outcome = await pushWorkspace(harness.transport, config.gateway, {
+    node: "node-1",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "app"),
+    incrementalFrom: undefined,
+    exclude: undefined,
+    signal: undefined,
+    progress: undefined,
+  });
+  assert.equal(outcome.status, "published");
+  assert.ok(ackSizes.length >= 2, `expected at least two batch acknowledgements, got ${ackSizes.length}`);
+  assert.equal(ackSizes.reduce((total, size) => total + size, 0), 130);
+  assert.ok(ackSizes.every((size) => size > 0 && size <= PUSH_ACK_FILES));
+});
+
+test("a batch failure names the failing file and never reports success", async () => {
+  const { sourceRoot, destinationRoot, config } = await setup({
+    "a.txt": "a",
+    "b.txt": "b",
+    "c.txt": "c",
+    "d.txt": "d",
+  });
+  let dataFrames = 0;
+  let resultMessage: string | undefined;
+  const harness = createHarness(createNodeCommands({
+    gateway: { localRoots: [sourceRoot], chunkBytes: 1024, timeoutMs: 20_000 },
+    node: { pushRoots: [destinationRoot] },
+  }).commands, {
+    gatewayFrame: (frame) => {
+      if (frame[0] !== 1) return undefined;
+      dataFrames += 1;
+      if (dataFrames !== 2) return undefined;
+      const copy = new Uint8Array(frame);
+      copy[copy.length - 1] ^= 0xff;
+      return copy;
+    },
+    nodeFrame: (frame) => {
+      if (frame[0] !== 2) return undefined;
+      const value = JSON.parse(Buffer.from(frame.subarray(1)).toString("utf8")) as {
+        t?: string;
+        ok?: boolean;
+        message?: string;
+      };
+      if (value.t === "result" && value.ok === false && typeof value.message === "string") {
+        resultMessage = value.message;
+      }
+      return undefined;
+    },
+  });
+  const remotePath = path.join(destinationRoot, "app");
+  await assert.rejects(() =>
+    pushWorkspace(harness.transport, config.gateway, {
+      node: "node-1",
+      localPath: sourceRoot,
+      remotePath,
+      incrementalFrom: undefined,
+      exclude: undefined,
+      signal: undefined,
+      progress: undefined,
+    }),
+  );
+  assert.match(resultMessage ?? "", /file failed verification: b\.txt/);
+  const status = await workspaceStatus(harness.transport, config.gateway, { node: "node-1", remotePath });
+  assert.equal(status.complete, false);
+});
+
+test("a file fsync failure happens before the complete marker", async () => {
+  const { sourceRoot, destinationRoot, config, harness } = await setup({ "a.txt": "alpha", "b.txt": "beta" });
+  const originalOpen = fs.open.bind(fs);
+  try {
+    (fs as unknown as { open: typeof fs.open }).open = async (target, flags, ...rest) => {
+      if (String(target) === path.join(destinationRoot, "app", "a.txt") && flags === "r") {
+        const error = new Error("simulated file fsync failure") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalOpen(target, flags, ...rest);
+    };
+    await assert.rejects(
+      () =>
+        pushWorkspace(harness.transport, config.gateway, {
+          node: "node-1",
+          localPath: sourceRoot,
+          remotePath: path.join(destinationRoot, "app"),
+          exclude: undefined,
+          signal: undefined,
+          progress: undefined,
+        }),
+      (error: unknown) => error instanceof NodeWorkspaceError && error.code === "io",
+    );
+  } finally {
+    (fs as unknown as { open: typeof fs.open }).open = originalOpen;
+  }
+  const marker = JSON.parse(
+    await fs.readFile(path.join(destinationRoot, "app", ".openclaw-node-workspace.json"), "utf8"),
+  ) as { state: string };
+  assert.equal(marker.state, "incomplete");
 });

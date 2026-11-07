@@ -274,6 +274,8 @@ export async function verifyStagedTree(
   }
 }
 
+const SMALL_FILE_HASH_BYTES = 4 * 1024 * 1024;
+
 function drift(reason: string): never {
   throw new NodeWorkspaceError("destination-drifted", reason);
 }
@@ -336,10 +338,14 @@ export async function verifyTreeMatches(
         drift(`published executable bit differs at ${relative}`);
       }
       const hash = createHash("sha256");
-      const stream = createReadStream(absolute);
-      for await (const chunk of stream) {
-        check();
-        hash.update(chunk as Buffer);
+      if (stat.size <= SMALL_FILE_HASH_BYTES) {
+        hash.update(await fs.readFile(absolute));
+      } else {
+        const stream = createReadStream(absolute);
+        for await (const chunk of stream) {
+          check();
+          hash.update(chunk as Buffer);
+        }
       }
       if (hash.digest("hex") !== expected.sha256) drift(`published file content differs at ${relative}`);
       seenFiles.add(relative);
@@ -355,7 +361,50 @@ export async function verifyTreeMatches(
   }
 }
 
-export async function fsyncTreeDirectories(root: string): Promise<void> {
+async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      const item = items[index];
+      if (item === undefined) return;
+      await worker(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * fsync every published file before the complete marker is written.
+ *
+ * Per-file durability is not required while receiving: the incomplete marker
+ * already makes a partial tree explicit. Fsyncing in a bounded pool before the
+ * complete marker keeps the crash guarantee without paying one serial sync per
+ * file on the critical path.
+ */
+export async function fsyncTreeFiles(
+  root: string,
+  files: readonly ManifestEntry[],
+  concurrency = 16,
+): Promise<void> {
+  await runPool(files, concurrency, async (entry) => {
+    const absolute = path.join(root, ...entry.path.split("/"));
+    let handle;
+    try {
+      handle = await fs.open(absolute, "r");
+      await handle.sync();
+    } catch (error) {
+      throw new NodeWorkspaceError("io", `cannot sync ${entry.path}: ${errorMessage(error)}`, {}, {
+        cause: error,
+      });
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  });
+}
+
+export async function fsyncTreeDirectories(root: string, concurrency = 16): Promise<void> {
   const directories: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     directories.push(directory);
@@ -365,7 +414,7 @@ export async function fsyncTreeDirectories(root: string): Promise<void> {
     }
   };
   await walk(root);
-  for (const directory of directories) await fsyncDirectory(directory);
+  await runPool(directories, concurrency, fsyncDirectory);
 }
 
 export async function fsyncDirectory(directory: string): Promise<void> {

@@ -49,7 +49,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/*.test.ts\"",
     "check": "npm run build && npm test",
-    "pack:inspect": "bash scripts/pack-and-inspect.sh"
+    "pack:inspect": "bash scripts/pack-and-inspect.sh",
+    "bench:push": "node --import tsx scripts/bench-push.mjs"
   },
   "repository": {
     "type": "git",

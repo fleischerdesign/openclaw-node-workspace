@@ -38,6 +38,7 @@ import {
   cleanupIncomplete,
   fsyncDirectory,
   fsyncTreeDirectories,
+  fsyncTreeFiles,
   readMarker,
   resolveArtifactSource,
   resolvePushDestination,
@@ -265,6 +266,15 @@ async function handlePush(
     let bytesDone = reusedBytes;
     let lastProgressAt = 0;
     let open: { entry: PushHello["manifest"][number]; handle: FileHandle; hash: ReturnType<typeof createHash>; received: number } | undefined;
+    const pendingAcks: { path: string; bytes: number; sha256: string }[] = [];
+    let pendingAckBytes = 0;
+
+    const flushAcks = async (): Promise<void> => {
+      if (pendingAcks.length === 0) return;
+      await session.sendControl({ t: "files-ok", files: pendingAcks });
+      pendingAcks.length = 0;
+      pendingAckBytes = 0;
+    };
 
     const advanceReuse = (): void => {
       while (index < hello.manifest.length && reuse.has(hello.manifest[index]?.path ?? "")) index += 1;
@@ -275,18 +285,15 @@ async function handlePush(
       if (!open) return;
       const current = open;
       open = undefined;
-      await current.handle.sync();
+      // Data is made durable in one bounded phase before the complete marker;
+      // a per-file fsync here is not needed for the crash guarantee.
       await current.handle.close();
       const actual = current.hash.digest("hex");
       if (actual !== current.entry.sha256 || current.received !== current.entry.size) {
         throw new NodeWorkspaceError("integrity", `file failed verification: ${current.entry.path}`);
       }
-      await session.sendControl({
-        t: "file-ok",
-        path: current.entry.path,
-        bytes: current.received,
-        sha256: actual,
-      });
+      pendingAcks.push({ path: current.entry.path, bytes: current.received, sha256: actual });
+      pendingAckBytes += current.received;
     };
 
     for (;;) {
@@ -317,6 +324,27 @@ async function handlePush(
 
       const value = assertControlFrame(frame);
       const type = controlType(value);
+      if (type === "batch") {
+        if (open) throw new NodeWorkspaceError("protocol", "batch received while a file is incomplete");
+        if (
+          typeof value.files !== "number" ||
+          !Number.isSafeInteger(value.files) ||
+          value.files < 0 ||
+          typeof value.bytes !== "number" ||
+          !Number.isSafeInteger(value.bytes) ||
+          value.bytes < 0
+        ) {
+          throw new NodeWorkspaceError("protocol", "batch acknowledgement header is malformed");
+        }
+        if (value.files !== pendingAcks.length || value.bytes !== pendingAckBytes) {
+          throw new NodeWorkspaceError(
+            "protocol",
+            `batch acknowledgement mismatch: expected ${pendingAcks.length} files/${pendingAckBytes} bytes, received ${value.files}/${value.bytes}`,
+          );
+        }
+        await flushAcks();
+        continue;
+      }
       if (type === "file") {
         if (open) throw new NodeWorkspaceError("protocol", "new file header before the previous file completed");
         advanceReuse();
@@ -336,6 +364,9 @@ async function handlePush(
       }
       if (type === "end") {
         if (open) throw new NodeWorkspaceError("protocol", "end received before the current file completed");
+        if (pendingAcks.length > 0) {
+          throw new NodeWorkspaceError("protocol", "end received before the final batch acknowledgement");
+        }
         advanceReuse();
         if (index !== hello.manifest.length) {
           throw new NodeWorkspaceError("protocol", "end received before every declared file was sent");
@@ -350,6 +381,13 @@ async function handlePush(
     if (digest !== hello.treeDigest) {
       throw new NodeWorkspaceError("integrity", "recomputed tree digest does not match the declared digest");
     }
+    // Crash ordering: every file's data and every directory entry, including
+    // the destination's parent entry, become durable before the complete
+    // marker is written. A crash before the marker leaves an incomplete
+    // publication; after the marker the publication is durable.
+    await fsyncTreeFiles(destination, hello.manifest);
+    await fsyncTreeDirectories(destination);
+    await fsyncDirectory(resolved.parent);
     // Replace only our own marker file atomically; the destination name was
     // already claimed and is never renamed over.
     await writeMarker(destination, {
@@ -367,8 +405,6 @@ async function handlePush(
     // The complete marker is now durable-or-at-least-written; every later
     // failure is published=true and therefore an unknown outcome.
     published = true;
-    await fsyncTreeDirectories(destination);
-    await fsyncDirectory(resolved.parent);
 
     await session.sendControl({
       t: "result",

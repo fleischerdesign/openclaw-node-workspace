@@ -18,6 +18,11 @@
   is written in either case. Additions are created exclusively; modifications re-check the local
   digest immediately before an atomic replace; a failure rolls back files and directories this call
   created. No local file is ever deleted.
+- **Complete means durable.** A push does not fsync each file while receiving; it fsyncs every
+  published file and every directory in a bounded pool before writing the complete marker, and the
+  destination parent is durable before that marker too. A crash before the marker leaves an
+  incomplete publication; a complete marker therefore implies the data and names are durable. A
+  batch acknowledgement error names the failing file and never reports success.
 - **Returned bytes are staged first.** A return streams into a private `.nodews-return-<id>`
   directory inside the target project. Every file is verified by size and SHA-256 against the node's
   manifest, and the local tree is touched only after the node's `end` frame. A disconnect during the

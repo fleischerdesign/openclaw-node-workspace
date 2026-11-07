@@ -299,6 +299,7 @@ npm run build
 bash scripts/pack-and-inspect.sh        # real plugin loader, isolated disposable state
 bash scripts/integration-isolated.sh    # isolated Gateway + node host on a free port
 bash scripts/e2e-model-driven.sh        # scripted model turns the real agent tool path
+npm run bench:push                      # reproducible publish benchmark (small/mixed/large)
 ```
 
 The integration scripts refuse to use the live state directory: they set

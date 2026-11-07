@@ -18,8 +18,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 99
-ℹ pass 99
+ℹ tests 102
+ℹ pass 102
 ℹ fail 0
 ```
 
@@ -71,6 +71,27 @@ The script asserts the wire trace, not the transcript alone: the tool order in t
 the `exec` arguments (`host: "node"`, `workdir` equal to the push result's cwd), the node stdout
 containing that cwd, the fetched bytes and their digest, the agent's tool summary (3 calls, 0
 failures), and the session's presence in `sessions.list`.
+
+## Publish performance
+
+`npm run bench:push` creates the fixtures under a temporary directory, publishes each into a fresh
+destination with the in-process framed transport and the real node handlers, warms once, and reports
+median/min/max over five iterations on ext4 (the temporary directory is on the same filesystem as
+the repository). It is not a network benchmark; only the channel hop is in-process.
+
+| Fixture | Files | Bytes | Before median (min–max) | After median (min–max) | Files/s before → after |
+| --- | --- | --- | --- | --- | --- |
+| small | 1850 × 4 KiB | 7,577,600 | 2484 ms (2327–2594) | 1641 ms (1578–1981) | 745 → 1127 |
+| mixed | 300 × 1 KiB–256 KiB | 9,523,200 | 417 ms (382–459) | 299 ms (295–364) | 719 → 1005 |
+| large | 8 × 8 MiB | 67,108,864 | 299 ms (270–310) | 367 ms (353–372) | 27 → 22 |
+
+The large fixture is dominated by transfer and bulk fsync rather than per-file work; repeated runs
+ranged from 320 ms to 367 ms, so it is reported as unchanged/noisy rather than improved. The small-file path is the target: the bounded fsync phase removed the
+serial per-file sync (measured separately at 694 ms serial vs 39 ms at concurrency 16 for 1850
+files), batching reduced one control round trip per file to one per 128 files/8 MiB, and small-file
+hashing now uses `readFile` instead of a stream. The remaining bottleneck is the three per-file
+filesystem passes (source scan/hash, node write, final re-hash before the marker) plus the fsync
+pool; the complete-marker durability rule is unchanged.
 
 ## Security-review regressions
 

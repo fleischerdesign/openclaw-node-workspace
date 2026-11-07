@@ -60,6 +60,8 @@ function compileExcludes(patterns: readonly string[]): (relativePath: string) =>
     compiled.some((pattern) => minimatch(relativePath, pattern, { dot: true }) || minimatch(relativePath, `${pattern}/**`, { dot: true }));
 }
 
+const SMALL_FILE_HASH_BYTES = 4 * 1024 * 1024;
+
 async function hashFile(absolutePath: string): Promise<{ size: number; sha256: string }> {
   const before = await fs.lstat(absolutePath);
   if (!before.isFile()) {
@@ -67,12 +69,18 @@ async function hashFile(absolutePath: string): Promise<{ size: number; sha256: s
   }
   const hash = createHash("sha256");
   let bytes = 0;
-  const stream = createReadStream(absolutePath);
   try {
-    for await (const chunk of stream) {
-      const buffer = chunk as Buffer;
-      bytes += buffer.byteLength;
-      hash.update(buffer);
+    if (before.size <= SMALL_FILE_HASH_BYTES) {
+      const content = await fs.readFile(absolutePath);
+      bytes = content.byteLength;
+      hash.update(content);
+    } else {
+      const stream = createReadStream(absolutePath);
+      for await (const chunk of stream) {
+        const buffer = chunk as Buffer;
+        bytes += buffer.byteLength;
+        hash.update(buffer);
+      }
     }
   } catch (error) {
     throw new NodeWorkspaceError("io", `failed to read ${absolutePath}: ${errorMessage(error)}`, {}, { cause: error });

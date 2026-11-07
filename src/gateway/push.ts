@@ -7,7 +7,7 @@ import { derivePushId } from "../digest.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
 import { scanWorkspace, type ScanResult } from "../manifest.js";
 import { RETURN_STATE_FILE, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
-import { COMMAND_PUSH, PROTOCOL_VERSION } from "../protocol.js";
+import { COMMAND_PUSH, PROTOCOL_VERSION, PUSH_ACK_BYTES, PUSH_ACK_FILES } from "../protocol.js";
 import { workspaceStatus } from "./status.js";
 import { writeReturnState } from "./return-state.js";
 import {
@@ -131,6 +131,30 @@ function mapRejected(value: Record<string, unknown>): NodeWorkspaceError {
   return new NodeWorkspaceError(code as NodeWorkspaceError["code"], message, {
     ...(value.partial === true ? { partial: true } : {}),
   });
+}
+
+/**
+ * After a send failure, a node result may already be queued behind the failed
+ * write (the node can reject and close while the Gateway is still sending).
+ * Drain the queued controls once so a named failure is not hidden behind an
+ * unknown outcome.
+ */
+async function drainNodeFailure(session: FrameSession): Promise<NodeWorkspaceError | undefined> {
+  for (;;) {
+    let frame;
+    try {
+      frame = await session.next(1);
+    } catch {
+      return undefined;
+    }
+    if (frame.kind !== "control") return undefined;
+    const value = assertControlFrame(frame);
+    const type = controlType(value);
+    if (type === "progress") continue;
+    if (type === "result" && value.ok === true) return undefined;
+    if (type === "result" || type === "file-error" || type === "rejected") return mapRejected(value);
+    return undefined;
+  }
 }
 
 export async function pushWorkspace(
@@ -311,6 +335,65 @@ export async function pushWorkspace(
       input.progress?.({ phase, filesDone, filesTotal: scan.files.length, bytesDone, bytesTotal: scan.totalBytes });
     };
 
+    const pending: { readonly entry: (typeof scan.files)[number]; readonly bytes: number }[] = [];
+    let pendingBytes = 0;
+    const flushBatch = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      const active = session;
+      if (!active) throw new NodeWorkspaceError("transport", "node channel disappeared");
+      await active.sendControl({ t: "batch", files: pending.length, bytes: pendingBytes });
+      const expected = pending;
+      for (;;) {
+        const frame = await active.next(remaining());
+        if (frame.kind === "data") {
+          throw new NodeWorkspaceError("protocol", "the node sent file data while acknowledging a batch");
+        }
+        const value = assertControlFrame(frame);
+        const type = controlType(value);
+        if (type === "progress") {
+          const filesDoneValue = typeof value.filesDone === "number" ? value.filesDone : filesDone;
+          const bytesDoneValue = typeof value.bytesDone === "number" ? value.bytesDone : bytesDone;
+          input.progress?.({
+            phase: "sending",
+            filesDone: filesDoneValue,
+            filesTotal: scan.files.length,
+            bytesDone: bytesDoneValue,
+            bytesTotal: scan.totalBytes,
+          });
+          continue;
+        }
+        if (type === "file-error" || type === "rejected") throw mapRejected(value);
+        if (type === "result") {
+          resultReceived = true;
+          throw mapRejected(value);
+        }
+        if (type !== "files-ok") {
+          throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} while sending`);
+        }
+        if (!Array.isArray(value.files) || value.files.length !== expected.length) {
+          throw new NodeWorkspaceError("integrity", "node batch acknowledgement has the wrong number of files");
+        }
+        for (let index = 0; index < expected.length; index += 1) {
+          const ack = value.files[index] as Record<string, unknown> | undefined;
+          const sent = expected[index];
+          if (
+            !ack ||
+            sent === undefined ||
+            ack.path !== sent.entry.path ||
+            ack.bytes !== sent.entry.size ||
+            ack.sha256 !== sent.entry.sha256
+          ) {
+            throw new NodeWorkspaceError("integrity", `node acknowledgement does not match ${sent?.entry.path ?? "a file"}`);
+          }
+        }
+        filesDone += expected.length;
+        report("sending", true);
+        pending.length = 0;
+        pendingBytes = 0;
+        return;
+      }
+    };
+
     for (const entry of scan.files) {
       if (reuse.has(entry.path)) continue;
       checkAborted(input.signal);
@@ -341,43 +424,13 @@ export async function pushWorkspace(
       } finally {
         await handle.close().catch(() => undefined);
       }
-
-      // Wait for this file's acknowledgement, forwarding node progress.
-      for (;;) {
-        const frame = await session.next(remaining());
-        if (frame.kind === "data") {
-          throw new NodeWorkspaceError("protocol", "the node sent file data while receiving a file");
-        }
-        const value = assertControlFrame(frame);
-        const type = controlType(value);
-        if (type === "progress") {
-          const filesDoneValue = typeof value.filesDone === "number" ? value.filesDone : filesDone;
-          const bytesDoneValue = typeof value.bytesDone === "number" ? value.bytesDone : bytesDone;
-          input.progress?.({
-            phase: "sending",
-            filesDone: filesDoneValue,
-            filesTotal: scan.files.length,
-            bytesDone: bytesDoneValue,
-            bytesTotal: scan.totalBytes,
-          });
-          continue;
-        }
-        if (type === "file-error" || type === "rejected") throw mapRejected(value);
-        if (type === "result") {
-          resultReceived = true;
-          throw mapRejected(value);
-        }
-        if (type !== "file-ok") {
-          throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} while sending`);
-        }
-        if (value.path !== entry.path || value.sha256 !== entry.sha256 || value.bytes !== entry.size) {
-          throw new NodeWorkspaceError("integrity", `node acknowledgement does not match ${entry.path}`);
-        }
-        filesDone += 1;
-        report("sending", true);
-        break;
+      pending.push({ entry, bytes: entry.size });
+      pendingBytes += entry.size;
+      if (pending.length >= PUSH_ACK_FILES || pendingBytes >= PUSH_ACK_BYTES) {
+        await flushBatch();
       }
     }
+    await flushBatch();
 
     report("publishing", true);
     await session.sendControl({ t: "end" });
@@ -418,7 +471,15 @@ export async function pushWorkspace(
       }
       throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)} after the push`);
     }
-  } catch (error) {
+  } catch (caught) {
+    let error = caught;
+    if (accepted && !resultReceived && session) {
+      const terminal = await drainNodeFailure(session);
+      if (terminal) {
+        resultReceived = true;
+        error = terminal;
+      }
+    }
     if (
       accepted &&
       !resultReceived &&

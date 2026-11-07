@@ -1,7 +1,11 @@
 import type { ManifestEntry } from "./digest.js";
 import { NodeWorkspaceError } from "./errors.js";
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
+
+/** A publish acknowledges a bounded window instead of every file. */
+export const PUSH_ACK_FILES = 128;
+export const PUSH_ACK_BYTES = 8 * 1024 * 1024;
 export const COMMAND_PUSH = "nodews.push";
 export const COMMAND_FETCH = "nodews.fetch";
 export const COMMAND_STATUS = "nodews.status";
@@ -33,7 +37,7 @@ export interface TreeRequest {
  */
 export interface ReturnHello {
   readonly t: "hello";
-  readonly protocol: 3;
+  readonly protocol: 4;
   readonly remotePath: string;
   readonly paths: readonly string[];
   readonly treeDigest: string;
@@ -44,7 +48,7 @@ export interface ReturnHello {
 
 export interface PushHello {
   readonly t: "hello";
-  readonly protocol: 3;
+  readonly protocol: 4;
   readonly pushId: string;
   readonly remotePath: string;
   readonly totalBytes: number;
@@ -62,13 +66,20 @@ export interface FetchRequest {
   readonly maxBytes: number;
 }
 
-export type GatewayControl = PushHello | { readonly t: "file"; readonly path: string } | { readonly t: "end" };
+export type GatewayControl =
+  | PushHello
+  | { readonly t: "file"; readonly path: string }
+  | { readonly t: "batch"; readonly files: number; readonly bytes: number }
+  | { readonly t: "end" };
 
 export type NodeControl =
   | { readonly t: "accepted"; readonly pushId: string }
   | { readonly t: "rejected"; readonly code: string; readonly message: string }
   | { readonly t: "progress"; readonly phase: string; readonly filesDone: number; readonly bytesDone: number }
-  | { readonly t: "file-ok"; readonly path: string; readonly bytes: number; readonly sha256: string }
+  | {
+      readonly t: "files-ok";
+      readonly files: readonly { readonly path: string; readonly bytes: number; readonly sha256: string }[];
+    }
   | { readonly t: "file-error"; readonly path: string; readonly code: string; readonly message: string }
   | {
       readonly t: "result";

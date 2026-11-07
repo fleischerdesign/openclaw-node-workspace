@@ -22,13 +22,14 @@ than buffered without bound.
 
 | Message | Direction | Fields |
 | --- | --- | --- |
-| `hello` | G→N | `protocol: 3`, `pushId`, `remotePath`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]`, optional `base`, optional `reuse[]` |
+| `hello` | G→N | `protocol: 4`, `pushId`, `remotePath`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]`, optional `base`, optional `reuse[]` |
 | `accepted` | N→G | `pushId` |
 | `rejected` | N→G | `code`, `message` |
 | `progress` | N→G | `phase`, `filesDone`, `bytesDone` |
 | `file` | G→N | `path` |
 | *data frames* | G→N | exactly the manifest entry's `size` bytes |
-| `file-ok` | N→G | `path`, `bytes`, `sha256` |
+| `batch` | G→N | `files`, `bytes` |
+| `files-ok` | N→G | `files: [{ path, bytes, sha256 }]` |
 | `file-error` | N→G | `path`, `code`, `message` |
 | `end` | G→N | — |
 | `result` (ok) | N→G | `pushId`, `digest`, `files`, `bytes` |
@@ -48,8 +49,12 @@ Before `accepted`, the node claims the destination with `mkdir(2)`, writes an `i
 and only then accepts. An existing file, symlink, or directory (including an empty directory)
 fails the claim with `EEXIST`; the node never renames over a destination. Files are sent in manifest
 order. The node enforces that order, so an out-of-order or duplicated `file` header is a protocol
-error. The Gateway waits for `file-ok` before sending the next header. The destination is visible
-while files arrive; the marker state distinguishes incomplete from complete.
+error. The Gateway sends files in a bounded window (128 files or 8 MiB, whichever comes first), then
+sends `batch` with the exact file and byte count. The node validates the count, flushes one
+`files-ok` frame covering that window, and the Gateway verifies every path, size, and digest before
+sending the next window. A window is never unbounded: the frame queue is capped, and the node
+applies the same limit while reading. The destination is visible while files arrive; the marker
+state distinguishes incomplete from complete.
 
 ### Validation on the node
 
@@ -126,7 +131,7 @@ This command is read-only and bounded by the node limits.
 
 | Message | Direction | Fields |
 | --- | --- | --- |
-| `hello` | G→N | `protocol: 3`, `remotePath`, `paths[]`, `treeDigest`, `planDigest`, `exclude[]` |
+| `hello` | G→N | `protocol: 4`, `remotePath`, `paths[]`, `treeDigest`, `planDigest`, `exclude[]` |
 | `accepted` | N→G | `treeDigest` |
 | `file` | N→G | `path`, `size`, `sha256`, `executable` |
 | *data frames* | N→G | exactly the announced bytes |
@@ -166,11 +171,13 @@ only then applies the plan locally. A disconnect before `end` therefore changes 
 | Node operation | 300 s absolute | node |
 
 A timeout before `accepted` means nothing was published; a claim that failed mid-write is cleaned
-up when it is empty or contains only the incomplete marker. A timeout after `accepted` is reported as
+up when it is empty or contains only the incomplete marker. A batch error names the failing file in
+`file-error`/`result.message`; an error while the Gateway still has frames in flight is reported
+as `unknown-outcome` and is never a success. A timeout after `accepted` is reported as
 `unknown-outcome`; see [Operations](operations.md).
 
 ## Compatibility
 
-Protocol version `3` is the only version. Both sides must run the same plugin major version; the
+Protocol version `4` is the only version. Both sides must run the same plugin major version; the
 node rejects any other `protocol` value rather than guessing. OpenClaw plugin APIs are experimental,
 so pin the OpenClaw version and test both hosts on upgrade.

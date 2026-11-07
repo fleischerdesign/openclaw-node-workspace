@@ -77,7 +77,7 @@ protocol rather than an archive:
    the configured timeout, and the caller's abort signal.
 5. **Claim and negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes,
    digest, and, for an incremental publish, the base path, digest, and reuse list. The node
-   validates protocol version 3, every path, limits, the destination parent, and the base
+   validates protocol version 4, every path, limits, the destination parent, and the base
    publication before claiming. It then claims the destination with `mkdir(2)`: an existing file,
    symlink, or directory (including an empty one) makes that call fail with `EEXIST`, so nothing is
    ever replaced. Only after the claim does it write an `incomplete` marker and accept.
@@ -85,15 +85,25 @@ protocol rather than an archive:
    copies the file with `COPYFILE_EXCL`, applies the owner-only mode, and re-hashes the copy against
    the incoming manifest. A base that changed after verification fails with `destination-drifted`.
    No byte of a reused file crosses the channel.
-7. **Transfer.** For each changed file the Gateway sends a `file` header and then exactly `size`
-   bytes in `chunkBytes` chunks. The node writes directly into the claimed directory, creating files
-   with `O_EXCL`/`wx`, and acknowledges each file only after its digest matches. The node enforces
-   manifest order across reused and sent entries.
-8. **Verify and finalize.** On `end` the node checks that every manifest file arrived (sent or
-   reused), re-hashes the tree from disk, recomputes the tree digest, atomically replaces the marker
-   with `state: "complete"`, fsyncs every directory, and only then acknowledges success.
-9. **Confirm.** The node fsyncs the destination parent, then sends `result` with the digest, file
-   count, and byte count. The Gateway compares these against what it scanned before returning.
+7. **Transfer in bounded windows.** The Gateway sends a window of up to 128 files or 8 MiB of
+   changed files, then a `batch` control with the exact count. The node writes each file with
+   `O_EXCL`/`wx` and verifies its digest, but defers durability; it returns one `files-ok` frame per
+   window. The Gateway verifies every acknowledgement entry before sending the next window. Node
+   progress frames continue to report measured counters.
+8. **Make data durable.** On `end` the node checks that every manifest file arrived (sent or
+   reused), re-hashes the tree from disk, and recomputes the tree digest. It then fsyncs every file
+   and every directory in a bounded pool, and fsyncs the destination parent. No complete marker
+   exists during this phase.
+9. **Finalize.** Only after that phase does the node atomically replace the marker with
+   `state: "complete"`; `writeMarker` fsyncs the marker file and the destination directory. It then
+   sends `result` with the digest, file count, and byte count. The Gateway compares these against
+   what it scanned before returning.
+
+The crash rule is exact: a crash before the complete marker leaves an incomplete publication
+(status reports `complete: false`), and a complete marker means every file's data, every directory
+entry, and the destination's parent entry were durable before that marker was written. Per-file
+fsync during transfer is deliberately absent; the bounded fsync phase pays that cost once without
+requiring every file to be durable before the next file arrives.
 
 The destination name is never renamed over: `mkdir(2)` is the no-clobber primitive. The trade-off
 is visibility: the claimed directory appears before its files finish arriving. A reader can see an
