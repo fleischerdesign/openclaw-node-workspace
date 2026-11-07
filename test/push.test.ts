@@ -577,6 +577,19 @@ test("a parent fsync failure after the complete marker is an unknown outcome", a
   assert.equal(status.verified, true);
 });
 
+async function waitForDirectory(target: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if ((await fs.lstat(target)).isDirectory()) return;
+    } catch {
+      // Not created yet.
+    }
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${target}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 test("a subdirectory swapped to a symlink before a file write is rejected", async () => {
   const sourceRoot = await workspace({ "sub/a.txt": "alpha" });
   const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-symlink-race-"));
@@ -598,6 +611,10 @@ test("a subdirectory swapped to a symlink before a file write is rejected", asyn
         if (!swapped && message[0] === 2) {
           const value = JSON.parse(Buffer.from(message.subarray(1)).toString("utf8")) as { t?: string; path?: string };
           if (value.t === "file" && String(value.path).startsWith("sub/")) {
+            // The node creates its directory chain after accepting and then
+            // waits for this header. Wait for that known state before the
+            // swap so the test does not race directory creation.
+            await waitForDirectory(path.join(remotePath, "sub"));
             swapped = true;
             await fs.rm(path.join(remotePath, "sub"), { recursive: true, force: true });
             await fs.symlink(outside, path.join(remotePath, "sub"));
@@ -618,9 +635,15 @@ test("a subdirectory swapped to a symlink before a file write is rejected", asyn
         signal: undefined,
         progress: undefined,
       }),
-    (error: unknown) =>
-      error instanceof NodeWorkspaceError &&
-      (error.code === "symlink-rejected" || error.code === "unknown-outcome"),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "symlink-rejected",
   );
   assert.deepEqual(await fs.readdir(outside), []);
+  const status = await workspaceStatus(base.transport, config.gateway, {
+    node: "node-1",
+    remotePath,
+  });
+  assert.equal(status.exists, true);
+  assert.equal(status.owned, true);
+  assert.equal(status.complete, false);
+  assert.equal(status.verified, false);
 });
