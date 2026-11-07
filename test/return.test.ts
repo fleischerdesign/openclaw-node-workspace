@@ -87,6 +87,8 @@ test("a return preview reports additions, safe modifications, mode changes and r
   await fs.writeFile(path.join(remotePath, "src/a.txt"), "alpha generated");
   await fs.mkdir(path.join(remotePath, "gen"));
   await fs.writeFile(path.join(remotePath, "gen/new.txt"), "new");
+  // The expected mode below must not depend on the runner's umask.
+  await fs.chmod(path.join(sourceRoot, "src/b.txt"), 0o600);
   await fs.chmod(path.join(remotePath, "src/b.txt"), 0o755);
   await fs.rm(path.join(remotePath, "old.txt"));
 
@@ -160,6 +162,7 @@ test("a file changed on the node after the preview makes the plan stale", async 
 
 test("a mode-only change is applied without transferring bytes", async () => {
   const { sourceRoot, remotePath, config, harness } = await published({ "run.sh": "#!/bin/sh\n" });
+  await fs.chmod(path.join(sourceRoot, "run.sh"), 0o600);
   await fs.chmod(path.join(remotePath, "run.sh"), 0o755);
   const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
   assert.equal(preview.plan.counts.modeChanges, 1);
