@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
@@ -6,12 +7,19 @@ import { NodeWorkspaceError } from "../errors.js";
 import type { NodeTransport } from "../transport.js";
 import { fetchArtifact } from "./artifact.js";
 import { pushWorkspace, type PushProgress } from "./push.js";
+import type { TransferProgressStore, TransferScope } from "./progress-store.js";
 import { workspaceStatus, type StatusOutcome } from "./status.js";
 
 export interface ToolDependencies {
   readonly transport: NodeTransport;
   readonly config: GatewayConfig | undefined;
   readonly configError: string | undefined;
+  /** Session identity supplied by the host; absent for direct in-process tests. */
+  readonly scope?: TransferScope;
+  /** Session-scoped measured progress registry. */
+  readonly progress?: TransferProgressStore;
+  /** Wake feature subscribers after the registry changed. */
+  readonly onProgressChange?: () => void;
 }
 
 export interface AgentUpdate {
@@ -293,30 +301,39 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       outputSchema: pushDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
         let context: { node?: string; remotePath?: string; localPath?: string } = {};
+        const transferId = randomUUID();
+        const scope = deps.scope;
+        const tracked = scope && deps.progress ? { scope, store: deps.progress } : undefined;
+        let settled = false;
         try {
           const config = requireConfig(deps);
           const input = parsePushParams(params);
           context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
+          tracked?.store.begin(tracked.scope, transferId, "push");
           const outcome = await pushWorkspace(deps.transport, config, {
             node: input.node,
             localPath: input.localPath,
             remotePath: input.remotePath,
             exclude: input.exclude,
             signal,
-            progress: onUpdate
-              ? (progress) =>
-                  onUpdate({
-                    content: [{ type: "text", text: progressText(progress) }],
-                    details: { phase: progress.phase },
-                    progress: {
-                      text: progressText(progress),
-                      visibility: "channel",
-                      privacy: "public",
-                      id: "node-workspace-push",
-                    },
-                  })
-              : undefined,
+            progress: (progress) => {
+              tracked?.store.updateFromPush(tracked.scope, transferId, progress);
+              deps.onProgressChange?.();
+              onUpdate?.({
+                content: [{ type: "text", text: progressText(progress) }],
+                details: { phase: progress.phase },
+                progress: {
+                  text: progressText(progress),
+                  visibility: "channel",
+                  privacy: "public",
+                  id: "node-workspace-push",
+                },
+              });
+            },
           });
+          tracked?.store.finish(tracked.scope, transferId, "completed");
+          settled = true;
+          deps.onProgressChange?.();
           const mib = (outcome.bytes / (1024 * 1024)).toFixed(2);
           const verb = outcome.status === "already-applied" ? "already present" : "published";
           const skippedNote =
@@ -351,6 +368,16 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
+          if (!settled) {
+            const state =
+              error instanceof NodeWorkspaceError && error.code === "unknown-outcome"
+                ? "unknown"
+                : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
+                  ? "cancelled"
+                  : "failed";
+            tracked?.store.finish(tracked.scope, transferId, state);
+            deps.onProgressChange?.();
+          }
           return toolFailure("node_workspace_push", error, context);
         }
       },
@@ -366,31 +393,41 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
       outputSchema: Type.Union([artifactDetails, artifactFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
         let context: { node?: string; remotePath?: string; localPath?: string } = {};
+        const transferId = randomUUID();
+        const scope = deps.scope;
+        const tracked = scope && deps.progress ? { scope, store: deps.progress } : undefined;
+        let settled = false;
         try {
           const config = requireConfig(deps);
           const input = parseArtifactParams(params);
           context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
+          tracked?.store.begin(tracked.scope, transferId, "fetch");
           const outcome = await fetchArtifact(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
             localPath: input.localPath,
             signal,
-            progress: onUpdate
-              ? (bytesDone, bytesTotal) => {
-                  const percent = bytesTotal === 0 ? 100 : Math.floor((bytesDone / bytesTotal) * 100);
-                  onUpdate({
-                    content: [{ type: "text", text: `Node artifact fetch: ${percent}%` }],
-                    details: { bytesDone, bytesTotal },
-                    progress: {
-                      text: `Node artifact fetch: ${percent}%`,
-                      visibility: "channel",
-                      privacy: "public",
-                      id: "node-workspace-artifact",
-                    },
-                  });
-                }
-              : undefined,
+            progress: (bytesDone, bytesTotal) => {
+              tracked?.store.updateFetch(tracked.scope, transferId, bytesDone, bytesTotal);
+              deps.onProgressChange?.();
+              if (onUpdate) {
+                const percent = bytesTotal === 0 ? 100 : Math.floor((bytesDone / bytesTotal) * 100);
+                onUpdate({
+                  content: [{ type: "text", text: `Node artifact fetch: ${percent}%` }],
+                  details: { bytesDone, bytesTotal },
+                  progress: {
+                    text: `Node artifact fetch: ${percent}%`,
+                    visibility: "channel",
+                    privacy: "public",
+                    id: "node-workspace-artifact",
+                  },
+                });
+              }
+            },
           });
+          tracked?.store.finish(tracked.scope, transferId, "completed");
+          settled = true;
+          deps.onProgressChange?.();
           return {
             content: [
               {
@@ -408,6 +445,16 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             },
           };
         } catch (error) {
+          if (!settled) {
+            const state =
+              error instanceof NodeWorkspaceError && error.code === "unknown-outcome"
+                ? "unknown"
+                : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
+                  ? "cancelled"
+                  : "failed";
+            tracked?.store.finish(tracked.scope, transferId, state);
+            deps.onProgressChange?.();
+          }
           return toolFailure("node_workspace_artifact", error, context);
         }
       },

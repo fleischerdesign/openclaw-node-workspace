@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "24.10.1",
+    "esbuild": "0.28.2",
     "openclaw": "2026.11.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
@@ -44,7 +45,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-control-ui.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/*.test.ts\"",
     "check": "npm run build && npm test",

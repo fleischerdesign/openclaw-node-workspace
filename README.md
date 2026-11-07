@@ -133,6 +133,32 @@ openclaw config set gateway.nodes.commands.allow '["nodews.push","nodews.fetch",
 Both sides must agree on the command names, and the node must advertise them. A command denied by
 `gateway.nodes.commands.deny` stays denied even if it is also in `allow`.
 
+## Progress accessory
+
+The plugin can place a native accessory in the Control UI session header. It shows the measured
+scanning, sending and publishing counters for the current session, with a determinate bar, and
+turns into a short completion, unknown-outcome or failure state. It is session-scoped: the query
+uses the session key and agent id supplied by the host, and the broadcast carries no counters,
+paths or node names. It does not use the shared progress card.
+
+Native plugin UI is gated by the **Custom plugin UI** lab:
+
+```json5
+{
+  gateway: {
+    controlUi: {
+      experimental: { customPlugins: true },
+    },
+  },
+}
+```
+
+Enable it in **Settings → Labs → Custom plugin UI**, or with the config above. The Control UI must
+be opened from the same Gateway over HTTPS or a browser-trusted loopback URL such as
+`http://127.0.0.1:18789/`. Plain HTTP on a LAN address can serve the dashboard but cannot set the
+secure cookies required for native plugin assets. Disabling the lab removes the accessory; it does
+not uninstall the plugin or stop its backend operations.
+
 ## Use
 
 ```text

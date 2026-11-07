@@ -25,26 +25,53 @@
         "properties": {
           "localRoots": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "artifactRoots": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "exclude": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "symlinks": {
             "type": "string",
-            "enum": ["reject", "skip"]
+            "enum": [
+              "reject",
+              "skip"
+            ]
           },
-          "maxFiles": { "type": "integer", "minimum": 1 },
-          "maxFileBytes": { "type": "integer", "minimum": 1 },
-          "maxTotalBytes": { "type": "integer", "minimum": 1 },
-          "maxArtifactBytes": { "type": "integer", "minimum": 1 },
-          "chunkBytes": { "type": "integer", "minimum": 1024 },
-          "timeoutMs": { "type": "integer", "minimum": 1000 }
+          "maxFiles": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxFileBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxTotalBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxArtifactBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "chunkBytes": {
+            "type": "integer",
+            "minimum": 1024
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1000
+          }
         }
       },
       "node": {
@@ -53,18 +80,38 @@
         "properties": {
           "pushRoots": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "artifactRoots": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
-          "maxFiles": { "type": "integer", "minimum": 1 },
-          "maxFileBytes": { "type": "integer", "minimum": 1 },
-          "maxTotalBytes": { "type": "integer", "minimum": 1 },
-          "maxArtifactBytes": { "type": "integer", "minimum": 1 }
+          "maxFiles": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxFileBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxTotalBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxArtifactBytes": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     }
+  },
+  "controlUi": {
+    "entry": "dist/control-ui/bf3160fd2870812697472620c3f163a55f2548a0fcd97703634d0ddde97a24a6/index.js",
+    "styles": []
   }
 }

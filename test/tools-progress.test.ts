@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { resolvePluginConfig } from "../src/config.js";
+import { TransferProgressStore } from "../src/gateway/progress-store.js";
 import { createTools, type AgentUpdate } from "../src/gateway/tools.js";
 import { createNodeCommands } from "../src/node/commands.js";
 import { createHarness } from "./helpers/sim.js";
@@ -48,7 +49,17 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
   assert.equal(node.configError, undefined);
   const harness = createHarness(node.commands);
 
-  const pushTool = createTools({ transport: harness.transport, config: config.gateway, configError: undefined }).find(
+  const progress = new TransferProgressStore();
+  const scope = { sessionKey: "agent:main:progress", agentId: "main" };
+  let notifications = 0;
+  const pushTool = createTools({
+    transport: harness.transport,
+    config: config.gateway,
+    configError: undefined,
+    scope,
+    progress,
+    onProgressChange: () => (notifications += 1),
+  }).find(
     (tool) => tool.name === "node_workspace_push",
   );
   assert.ok(pushTool);
@@ -94,7 +105,29 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
     assert.ok(match, `unparseable progress text: ${text}`);
     return { files: Number(match[1]), total: Number(match[2]), mib: Number(match[3]) };
   });
+  assert.ok(notifications > 0, "no progress notification was emitted");
+  const snapshot = progress.snapshot(scope);
+  assert.equal(snapshot.length, 1);
+  assert.equal(snapshot[0]?.state, "completed");
+  assert.equal(snapshot[0]?.filesTotal, 2);
+  assert.equal(snapshot[0]?.filesDone, 2);
+  assert.equal(snapshot[0]?.bytesTotal, 80_000);
+
   assert.ok(parsed.every((entry) => entry.total === 2), "file total changed during the push");
+
+  // A rejected second publish is a measured failure, not a fake completion.
+  await fs.appendFile(path.join(sourceRoot, "a.bin"), "changed");
+  const conflict = await pushTool.execute("call-conflict", {
+    node: "Node One",
+    localPath: sourceRoot,
+    remotePath: path.join(destinationRoot, "target"),
+  });
+  assert.equal(conflict.details.ok, false);
+  const afterConflict = progress.snapshot(scope);
+  assert.equal(afterConflict.length, 2);
+  assert.equal(afterConflict[1]?.state, "failed");
+  assert.ok(!("localPath" in afterConflict[1]!));
+  assert.ok(!("remotePath" in afterConflict[1]!));
   for (let index = 1; index < parsed.length; index += 1) {
     assert.ok(parsed[index].files >= parsed[index - 1].files, "file counter went backwards");
     assert.ok(parsed[index].mib >= parsed[index - 1].mib, "byte counter went backwards");

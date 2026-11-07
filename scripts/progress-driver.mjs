@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// Drives the real Control UI in headless Chromium for the progress harness.
+// Drives the real Control UI in headless Chromium and verifies the native
+// session-header accessory against a live node_workspace_push.
 //
 // The page is the same Control UI a user opens; the message is typed into the
-// same composer. The only non-user part is the prompt text. The driver records
-// what the page actually shows while a real node_workspace_push is running and
-// fails when no in-flight progress text became visible.
+// same composer. The accessory is a native plugin contribution, so this also
+// proves the Custom plugin UI lab path, the session-scoped query, event-driven
+// refresh, and snapshot recovery after a browser reload. The transcript's own
+// progress gap is recorded separately and is not used for the assertion.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -30,15 +32,19 @@ if (!chromiumPath) {
 const prompt =
   process.env.PROGRESS_PROMPT ??
   "Publish the progress fixture directory to the progress-node with node_workspace_push. Do not do anything else.";
+const reconnect = process.env.PROGRESS_RECONNECT === "1";
+const doneToken = process.env.PROGRESS_DONE_TOKEN;
+const globalDeadlineMs = Number(process.env.PROGRESS_TIMEOUT_MS ?? 240_000);
 
 const progressLine = /Node workspace (scanning|sending|publishing):\s*(?:(\d+)\/(\d+) files,\s*)?([\d.]+) MiB/u;
-const consoleErrors = [];
-const samples = [];
-const screenshots = [];
-const allSamples = [];
-const wsEvents = [];
+const counterLine = /(\d+)\/(\d+)/u;
 
-function readProgress(text) {
+const consoleErrors = [];
+const transcriptSamples = [];
+const accessorySamples = [];
+const screenshots = [];
+
+function readTranscriptProgress(text) {
   const matches = [];
   for (const line of text.split("\n")) {
     const match = progressLine.exec(line.trim());
@@ -61,29 +67,12 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US" });
 const page = await context.newPage();
-page.on("websocket", (socket) => {
-  socket.on("framereceived", (frame) => {
-    if (process.env.PROGRESS_CAPTURE_WS !== "1") return;
-    const payload = typeof frame.payload === "string" ? frame.payload : "";
-    if (!payload) return;
-    let parsed;
-    try {
-      parsed = JSON.parse(payload);
-    } catch {
-      return;
-    }
-    const text = JSON.stringify(parsed);
-    if (!/progressText|tool_execution|"item"|"tool"/u.test(text)) return;
-    wsEvents.push({ atMs: Date.now(), text: text.slice(0, 4000) });
-  });
-});
 page.on("console", (message) => {
   if (message.type() === "error") consoleErrors.push(message.text().slice(0, 500));
 });
 page.on("pageerror", (error) => consoleErrors.push(`pageerror: ${String(error).slice(0, 500)}`));
 
-let failure;
-try {
+async function openComposer() {
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded", timeout: 90_000 });
   const composer = page.locator("textarea").first();
   await composer.waitFor({ state: "visible", timeout: 90_000 });
@@ -95,38 +84,95 @@ try {
     undefined,
     { timeout: 90_000 },
   );
-  fs.writeFileSync(readyFile, "ready\n");
+  return composer;
+}
 
+async function readAccessory() {
+  const accessory = page.locator("[data-node-workspace-progress]").first();
+  if ((await accessory.count()) === 0) return undefined;
+  if (!(await accessory.isVisible().catch(() => false))) return undefined;
+  const text = (await accessory.innerText().catch(() => "")).trim();
+  if (!text) return undefined;
+  const bars = await accessory
+    .locator("[data-nodews-bar]")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        value: Number(node.getAttribute("data-value")),
+        max: Number(node.getAttribute("data-max")),
+      })),
+    )
+    .catch(() => []);
+  const match = counterLine.exec(text);
+  return {
+    text,
+    filesDone: match ? Number(match[1]) : null,
+    filesTotal: match ? Number(match[2]) : null,
+    bars,
+  };
+}
+
+let failure;
+try {
+  const composer = await openComposer();
+  fs.writeFileSync(readyFile, "ready\n");
   await composer.fill(prompt);
   await composer.press("Enter");
 
   const startedAt = Date.now();
-  const deadline = startedAt + Number(process.env.PROGRESS_TIMEOUT_MS ?? 240_000);
+  const deadline = startedAt + globalDeadlineMs;
   let lastShotAt = 0;
-  let lastAnyShotAt = 0;
+  let lastCount = "";
   let done = false;
+  let reloaded = false;
+  let sawReconnectCount = false;
+
   while (Date.now() < deadline) {
     const text = await page.locator("body").innerText({ timeout: 10_000 });
     const elapsedMs = Date.now() - startedAt;
-    const progress = readProgress(text);
-    const progressBars = await page.locator('[role="progressbar"]').count().catch(() => 0);
-    allSamples.push({ elapsedMs, progressBars, textTail: text.slice(-1800) });
-    if (progress.length > 0) {
-      samples.push({ elapsedMs, progress, textTail: text.slice(-1200) });
-      if (elapsedMs - lastShotAt >= 400) {
-        const file = path.join(outDir, `progress-${String(screenshots.length).padStart(2, "0")}-${elapsedMs}ms.png`);
-        await page.screenshot({ path: file, fullPage: false });
-        screenshots.push({ file, elapsedMs, visibleProgress: progress.map((entry) => entry.line) });
+
+    const transcript = readTranscriptProgress(text);
+    if (transcript.length > 0) {
+      transcriptSamples.push({ elapsedMs, progress: transcript.map((entry) => entry.line) });
+    }
+
+    const accessory = await readAccessory();
+    if (accessory) {
+      accessorySamples.push({ elapsedMs, ...accessory, afterReconnect: reloaded });
+      if (reloaded && accessory.filesDone !== null && accessory.filesDone > 0) sawReconnectCount = true;
+      const countKey = `${accessory.filesDone}/${accessory.filesTotal}|${accessory.bars.map((bar) => bar.value).join(",")}`;
+      if (countKey !== lastCount && elapsedMs - lastShotAt >= 300) {
+        const file = path.join(outDir, `accessory-${String(screenshots.length).padStart(2, "0")}-${elapsedMs}ms.png`);
+        await page.screenshot({ path: file, fullPage: false, timeout: 15_000 });
+        screenshots.push({ file, elapsedMs, accessory: accessory.text, afterReconnect: reloaded });
         lastShotAt = elapsedMs;
+        lastCount = countKey;
       }
     }
-    if (process.env.PROGRESS_CAPTURE_ALL === "1" && elapsedMs - lastAnyShotAt >= 500 && elapsedMs < 60_000 && screenshots.length < 70) {
-      const file = path.join(outDir, `frame-${String(screenshots.length).padStart(2, "0")}-${elapsedMs}ms.png`);
-      await page.screenshot({ path: file, fullPage: false, timeout: 15_000 });
-      screenshots.push({ file, elapsedMs, visibleProgress: progress.map((entry) => entry.line), generic: true });
-      lastAnyShotAt = elapsedMs;
+
+    if (reconnect && !reloaded) {
+      const distinct = new Set(
+        accessorySamples
+          .filter((sample) => sample.filesDone !== null)
+          .map((sample) => `${sample.filesDone}/${sample.filesTotal}`),
+      );
+      if (distinct.size >= 2) {
+        const before = accessorySamples.at(-1);
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 90_000 }).catch(() => undefined);
+        await openComposer();
+        reloaded = true;
+        accessorySamples.push({
+          elapsedMs: Date.now() - startedAt,
+          text: "__reconnect__",
+          filesDone: null,
+          filesTotal: null,
+          bars: [],
+          afterReconnect: true,
+          beforeReload: before?.text,
+        });
+        continue;
+      }
     }
-    const doneToken = process.env.PROGRESS_DONE_TOKEN;
+
     if ((text.includes("PROGRESS DONE") && (!doneToken || text.includes(doneToken))) || (!doneToken && text.includes("published:"))) {
       done = true;
       await page.waitForTimeout(600);
@@ -135,44 +181,53 @@ try {
     await page.waitForTimeout(120);
   }
 
+  await page.waitForTimeout(1000);
+  const terminalAccessory = await readAccessory();
   const finalText = await page.locator("body").innerText({ timeout: 10_000 });
   const finalShot = path.join(outDir, "final.png");
   await page.screenshot({ path: finalShot, fullPage: false, timeout: 15_000 });
   screenshots.push({ file: finalShot, elapsedMs: Date.now() - startedAt, final: true });
 
-  const distinct = new Map();
-  for (const sample of samples) {
-    for (const entry of sample.progress) distinct.set(entry.line, entry);
+  const distinctCounts = new Map();
+  for (const sample of accessorySamples) {
+    if (sample.filesDone === null) continue;
+    const key = `${sample.filesDone}/${sample.filesTotal}`;
+    if (!distinctCounts.has(key)) distinctCounts.set(key, sample);
   }
-  const ordered = [...distinct.values()];
-  const sending = ordered.filter((entry) => entry.phase === "sending" && entry.filesTotal);
-  const maxFiles = Math.max(0, ...sending.map((entry) => entry.filesDone ?? 0));
-  const maxBytes = Math.max(0, ...sending.map((entry) => entry.bytesDone));
-  const visibleDuringTransfer = screenshots.filter((shot) => shot.visibleProgress && shot.visibleProgress.length > 0);
+  const orderedCounts = [...distinctCounts.values()];
+  const distinctBarValues = new Set(
+    accessorySamples.flatMap((sample) => sample.bars.map((bar) => bar.value)),
+  );
+  const progressScreenshots = screenshots.filter((shot) => shot.accessory);
 
   const report = {
     ok: false,
     done,
+    reloaded,
+    sawReconnectCount,
+    terminalAccessory,
     elapsedMs: Date.now() - startedAt,
-    distinctProgressLines: ordered.map((entry) => entry.line),
-    maxFilesDone: maxFiles,
-    maxMiB: maxBytes,
-    samples: samples.map((sample) => ({ elapsedMs: sample.elapsedMs, progress: sample.progress.map((entry) => entry.line) })),
-    allSamples: allSamples.filter((sample, index) => index % 5 === 0 || sample.progressBars > 0).slice(0, 200),
-    wsEvents: wsEvents.slice(0, 200),
+    distinctAccessoryCounts: orderedCounts.map((sample) => ({ text: sample.text, filesDone: sample.filesDone, filesTotal: sample.filesTotal })),
+    distinctBarValues: [...distinctBarValues],
+    accessorySamples: accessorySamples.slice(0, 400),
+    transcriptProgressLines: [...new Set(transcriptSamples.flatMap((sample) => sample.progress))],
     screenshots,
-    visibleDuringTransfer: visibleDuringTransfer.map((shot) => shot.file),
     consoleErrors,
     finalExcerpt: finalText.slice(-2500),
   };
 
   const problems = [];
   if (!done) problems.push("the turn did not report completion before the deadline");
-  if (ordered.length < 2) problems.push(`saw ${ordered.length} distinct progress line(s); expected at least 2 during the push`);
-  if (maxFiles < 1) problems.push("no progress line reported a non-zero file count");
-  if (maxBytes <= 0) problems.push("no progress line reported transferred bytes");
-  if (visibleDuringTransfer.length === 0) problems.push("no screenshot captured progress while the transfer was in flight");
-  if (!finalText.includes("PROGRESS DONE")) problems.push("the final assistant message was not visible");
+  if (orderedCounts.length < 2) {
+    problems.push(`the accessory showed ${orderedCounts.length} distinct file count(s); expected at least 2`);
+  }
+  if (distinctBarValues.size < 2) problems.push("the accessory bar value never changed");
+  if (progressScreenshots.length < 2) problems.push("fewer than two screenshots captured the accessory");
+  if (reconnect && !reloaded) problems.push("the browser was never reloaded for the reconnect check");
+  if (reconnect && !sawReconnectCount) problems.push("the accessory did not show a positive count after reload");
+  if (done && !terminalAccessory?.text.includes("✓")) {
+    problems.push("the accessory did not show a terminal completion state after the turn ended");
+  }
   if (problems.length > 0) {
     report.problems = problems;
     fs.writeFileSync(path.join(outDir, "report.json"), JSON.stringify(report, null, 2));
@@ -185,7 +240,7 @@ try {
   failure = String(error);
   try {
     const finalShot = path.join(outDir, "failure.png");
-    await page.screenshot({ path: finalShot, fullPage: false });
+    await page.screenshot({ path: finalShot, fullPage: false, timeout: 15_000 });
     fs.writeFileSync(
       path.join(outDir, "report.json"),
       JSON.stringify({ ok: false, failure, consoleErrors, screenshots }, null, 2),

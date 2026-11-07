@@ -30,8 +30,19 @@ test("the plugin registers its three tools, three node commands and one invoke p
         list: async () => ({ nodes: await harness.transport.listNodes() }),
       },
     },
-    registerTool: (tool: { name: string }) => {
-      tools.push(tool.name);
+    session: { controls: { registerSessionAction: () => undefined } },
+    registerService: () => undefined,
+    registerTool: (tool: unknown) => {
+      const candidates =
+        typeof tool === "function"
+          ? (tool as (ctx: { sessionKey?: string; agentId?: string }) => unknown)({
+              sessionKey: "agent:main:test",
+              agentId: "main",
+            })
+          : tool;
+      for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
+        tools.push((candidate as { name: string }).name);
+      }
     },
     registerNodeHostCommand: (command: { command: string }) => {
       commands.push(command.command);
@@ -84,9 +95,23 @@ test("the registered push tool publishes through the injected runtime and return
         list: async () => ({ nodes: await harness.transport.listNodes() }),
       },
     },
+    session: {
+      controls: {
+        registerSessionAction: () => undefined,
+      },
+    },
+    registerService: () => undefined,
     registerTool: (tool: unknown) => {
-      const candidate = tool as { name?: string };
-      if (candidate.name === "node_workspace_push") pushTool = tool as PushTool;
+      const candidates =
+        typeof tool === "function"
+          ? (tool as (ctx: { sessionKey?: string; agentId?: string }) => unknown)({
+              sessionKey: "agent:main:test",
+              agentId: "main",
+            })
+          : tool;
+      for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
+        if ((candidate as { name?: string }).name === "node_workspace_push") pushTool = candidate as PushTool;
+      }
     },
     registerNodeHostCommand: () => undefined,
     registerNodeInvokePolicy: () => undefined,

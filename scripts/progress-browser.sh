@@ -193,6 +193,10 @@ const gateway = {
     bind: "loopback",
     port: Number(port),
     auth: { mode: "none" },
+    controlUi: {
+      enabled: true,
+      experimental: { customPlugins: true },
+    },
     nodes: {
       pairing: { autoApproveCidrs: [] },
       commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] },
@@ -333,6 +337,7 @@ PROGRESS_CHROMIUM="$CHROMIUM_BIN" \
 PROGRESS_TIMEOUT_MS="${NODEWS_PROGRESS_TIMEOUT_MS:-240000}" \
 PROGRESS_CAPTURE_ALL=1 \
 PROGRESS_CAPTURE_WS=1 \
+PROGRESS_RECONNECT=1 \
 PROGRESS_DONE_TOKEN="$REMOTE_DIR" \
 PROGRESS_PROMPT="Publish the progress fixture directory to the progress-node with node_workspace_push. Do not do anything else." \
   node "$ROOT/scripts/progress-driver.mjs" "$PORT" "$EVIDENCE" "$WORK/ui-ready" >"$WORK/driver.log" 2>&1 &
@@ -382,9 +387,11 @@ console.log(
     {
       files: marker.files,
       bytes: marker.bytes,
-      distinctProgressLines: report.distinctProgressLines.length,
+      distinctAccessoryCounts: report.distinctAccessoryCounts.length,
+      distinctBarValues: report.distinctBarValues.length,
+      reloaded: report.reloaded,
+      sawReconnectCount: report.sawReconnectCount,
       screenshots: report.screenshots.length,
-      screenshotsWithProgress: report.visibleDuringTransfer,
       report: path.join(evidence, "report.json"),
     },
     null,
