@@ -1,22 +1,36 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import type { NodeConfig } from "../config.js";
+import {
+  sessionFromFrames,
+  readControl,
+  remaining,
+  lstatOrUndefined,
+  NODE_OPERATION_TIMEOUT_MS,
+  type NodeHostCommandIo,
+} from "./session.js";
+
+export type { NodeHostCommandIo } from "./session.js";
 import { resolvePluginConfig } from "../config.js";
 import { treeDigest } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
-import { assertControlFrame, controlType, FrameSession, type DuplexChannel } from "../transport.js";
+import { assertControlFrame, controlType } from "../transport.js";
 import {
   COMMAND_FETCH,
   COMMAND_PUSH,
+  COMMAND_RETURN,
   COMMAND_STATUS,
+  COMMAND_TREE,
   parseFetchRequest,
   parsePushHello,
   type PushHello,
 } from "../protocol.js";
 import { validateManifestShape } from "../manifest.js";
+import { handleReturn, handleTree } from "./return.js";
 import {
   assertDestinationAllowed,
   assertSafeParent,
@@ -28,22 +42,11 @@ import {
   resolveArtifactSource,
   resolvePushDestination,
   safeArtifactMode,
+  verifyStagedTree,
   verifyTreeMatches,
   writeMarker,
 } from "./fs-atomic.js";
-
-const CONTROL_TIMEOUT_MS = 120_000;
-const NODE_OPERATION_TIMEOUT_MS = 5 * 60_000;
 const FETCH_CHUNK_BYTES = 64 * 1024;
-
-/** Structural subset of the node-host command contract this plugin uses. */
-export interface NodeHostCommandIo {
-  readonly frames?: {
-    send(message: Uint8Array): Promise<void>;
-    onMessage(listener: (message: Uint8Array) => void | Promise<void>): () => void;
-  };
-  readonly signal?: AbortSignal;
-}
 
 export interface NodeHostCommandContext {
   readonly signal?: AbortSignal;
@@ -75,64 +78,11 @@ function loadConfig(raw: unknown): ConfigState {
   }
 }
 
-function sessionFromFrames(io: NodeHostCommandIo | undefined): FrameSession {
-  const frames = io?.frames;
-  if (!frames) {
-    throw new NodeWorkspaceError("protocol", "this node does not support framed node commands");
-  }
-  const signal = io?.signal;
-  const closed = new Promise<never>((_resolve, reject) => {
-    if (!signal) return;
-    const fail = () =>
-      reject(new NodeWorkspaceError("canceled", "the Gateway canceled the node command", {}, { cause: signal.reason }));
-    if (signal.aborted) fail();
-    else signal.addEventListener("abort", fail, { once: true });
-  });
-  // Swallow an unhandled rejection when the channel closes after success.
-  closed.catch(() => undefined);
-  const channel: DuplexChannel = {
-    send: (message) => frames.send(message),
-    onMessage: (listener) => frames.onMessage(listener),
-    closed,
-    close: () => undefined,
-  };
-  return FrameSession.openSync(channel);
-}
-
-async function readControl(
-  session: FrameSession,
-  expected: readonly string[],
-  deadline: number,
-): Promise<Record<string, unknown>> {
-  for (;;) {
-    const frame = await session.next(remaining(deadline));
-    const value = assertControlFrame(frame);
-    const type = controlType(value);
-    if (expected.includes(type)) return value;
-    throw new NodeWorkspaceError("protocol", `unexpected control frame ${JSON.stringify(type)}`);
-  }
-}
-
-function remaining(deadline: number): number {
-  const left = deadline - Date.now();
-  if (left <= 0) throw new NodeWorkspaceError("timeout", "the node operation exceeded its time limit");
-  return Math.min(left, CONTROL_TIMEOUT_MS);
-}
-
 function nodeConfig(state: ConfigState): NodeConfig {
   if (!state.config) {
     throw new NodeWorkspaceError("config-invalid", state.error ?? "plugin configuration is invalid");
   }
   return state.config.node;
-}
-
-async function lstatOrUndefined(target: string): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
-  try {
-    return await fs.lstat(target);
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return undefined;
-    throw new NodeWorkspaceError("io", `cannot inspect ${target}: ${errorMessage(error)}`, {}, { cause: error });
-  }
 }
 
 async function handlePush(
@@ -152,6 +102,59 @@ async function handlePush(
     validateManifestShape(hello, config);
     const resolved = await resolvePushDestination(hello.remotePath, config.pushRoots);
     const destination = resolved.destination;
+    const reuse = new Set(hello.reuse ?? []);
+    const reuseEntries = hello.manifest.filter((entry) => reuse.has(entry.path));
+
+    // An incremental base is read-only. Validate it before the destination is
+    // claimed so a bad base cannot leave a half-published generation behind.
+    let baseDirectory: string | undefined;
+    if (hello.base !== undefined) {
+      const baseResolved = await resolvePushDestination(hello.base.remotePath, config.pushRoots);
+      if (baseResolved.destination === destination) {
+        throw new NodeWorkspaceError("conflict", "the incremental base must differ from the new destination");
+      }
+      const baseStat = await lstatOrUndefined(baseResolved.destination);
+      if (baseStat === undefined) {
+        throw new NodeWorkspaceError("path-not-found", `incremental base does not exist: ${baseResolved.destination}`);
+      }
+      if (baseStat.isSymbolicLink() || !baseStat.isDirectory()) {
+        throw new NodeWorkspaceError("symlink-rejected", "incremental base must be a real directory");
+      }
+      const baseMarker = await readMarker(baseResolved.destination);
+      if (
+        baseMarker === undefined ||
+        baseMarker.state !== "complete" ||
+        baseMarker.manifest === undefined ||
+        baseMarker.directories === undefined
+      ) {
+        throw new NodeWorkspaceError(
+          "conflict",
+          "incremental base is not a complete plugin publication; publish a full generation and use that as the base",
+        );
+      }
+      if (baseMarker.digest !== hello.base.digest) {
+        throw new NodeWorkspaceError(
+          "destination-drifted",
+          "the incremental base no longer matches the digest the Gateway scanned; request a new preview and retry",
+        );
+      }
+      const baseFiles = new Map(baseMarker.manifest.map((entry) => [entry.path, entry]));
+      for (const entry of reuseEntries) {
+        const baseEntry = baseFiles.get(entry.path);
+        if (
+          baseEntry === undefined ||
+          baseEntry.size !== entry.size ||
+          baseEntry.sha256 !== entry.sha256 ||
+          baseEntry.executable !== entry.executable
+        ) {
+          throw new NodeWorkspaceError(
+            "destination-drifted",
+            `the incremental base does not contain the expected version of ${entry.path}`,
+          );
+        }
+      }
+      baseDirectory = baseResolved.destination;
+    }
 
     const existing = await lstatOrUndefined(destination);
     if (existing) {
@@ -221,10 +224,52 @@ async function handlePush(
       }
     }
 
+    let reusedBytes = 0;
+    if (baseDirectory !== undefined) {
+      for (const entry of reuseEntries) {
+        await assertSafeParent(destination, entry.path);
+        await assertSafeParent(baseDirectory, entry.path);
+        const from = path.join(baseDirectory, ...entry.path.split("/"));
+        const to = path.join(destination, ...entry.path.split("/"));
+        let sourceStat;
+        try {
+          sourceStat = await fs.lstat(from);
+        } catch (error) {
+          throw new NodeWorkspaceError(
+            "destination-drifted",
+            `incremental base entry disappeared: ${entry.path}`,
+            {},
+            { cause: error },
+          );
+        }
+        if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+          throw new NodeWorkspaceError("destination-drifted", `incremental base entry is not a regular file: ${entry.path}`);
+        }
+        try {
+          await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL);
+        } catch (error) {
+          if (isErrno(error, "EEXIST")) {
+            throw new NodeWorkspaceError("destination-drifted", `file appeared during publication: ${entry.path}`);
+          }
+          throw new NodeWorkspaceError("io", `cannot reuse ${entry.path}: ${errorMessage(error)}`, {}, { cause: error });
+        }
+        await fs.chmod(to, entry.executable ? 0o700 : 0o600);
+        reusedBytes += entry.size;
+      }
+      // The copy is verified against the incoming manifest, not the base
+      // marker. A base modified between its marker and this copy fails here.
+      await verifyStagedTree(destination, reuseEntries);
+    }
+
     let index = 0;
-    let bytesDone = 0;
+    let bytesDone = reusedBytes;
     let lastProgressAt = 0;
     let open: { entry: PushHello["manifest"][number]; handle: FileHandle; hash: ReturnType<typeof createHash>; received: number } | undefined;
+
+    const advanceReuse = (): void => {
+      while (index < hello.manifest.length && reuse.has(hello.manifest[index]?.path ?? "")) index += 1;
+    };
+    advanceReuse();
 
     const finishFile = async (): Promise<void> => {
       if (!open) return;
@@ -258,7 +303,7 @@ async function handlePush(
         bytesDone += frame.data.byteLength;
         if (open.received === open.entry.size) await finishFile();
         const now = Date.now();
-        if (now - lastProgressAt > 500 || index >= hello.manifest.length) {
+        if (now - lastProgressAt > 500) {
           lastProgressAt = now;
           await session.sendControl({
             t: "progress",
@@ -274,6 +319,7 @@ async function handlePush(
       const type = controlType(value);
       if (type === "file") {
         if (open) throw new NodeWorkspaceError("protocol", "new file header before the previous file completed");
+        advanceReuse();
         const entry = hello.manifest[index];
         if (!entry) throw new NodeWorkspaceError("protocol", "received more files than the manifest declares");
         if (typeof value.path !== "string" || value.path !== entry.path) {
@@ -285,10 +331,12 @@ async function handlePush(
         open = { entry, handle, hash: createHash("sha256"), received: 0 };
         if (entry.size === 0) await finishFile();
         index += 1;
+        advanceReuse();
         continue;
       }
       if (type === "end") {
         if (open) throw new NodeWorkspaceError("protocol", "end received before the current file completed");
+        advanceReuse();
         if (index !== hello.manifest.length) {
           throw new NodeWorkspaceError("protocol", "end received before every declared file was sent");
         }
@@ -330,7 +378,13 @@ async function handlePush(
       files: hello.manifest.length,
       bytes: hello.totalBytes,
     });
-    return JSON.stringify({ ok: true, pushId: hello.pushId, digest });
+    return JSON.stringify({
+      ok: true,
+      pushId: hello.pushId,
+      digest,
+      reusedFiles: reuseEntries.length,
+      reusedBytes,
+    });
   } catch (error) {
     const failure = error instanceof NodeWorkspaceError
       ? error
@@ -509,6 +563,19 @@ export function createNodeCommands(rawConfig: unknown): NodeCommandSet {
       dangerous: true,
       hasActiveWork: () => false,
       handle: (paramsJSON) => handleStatus(state, paramsJSON),
+    },
+    {
+      command: COMMAND_TREE,
+      dangerous: true,
+      hasActiveWork: () => false,
+      handle: (paramsJSON) => handleTree(nodeConfig(state), paramsJSON),
+    },
+    {
+      command: COMMAND_RETURN,
+      duplex: true,
+      dangerous: true,
+      hasActiveWork: () => false,
+      handle: (_paramsJSON, io) => handleReturn(nodeConfig(state), io),
     },
   ];
   return { commands, configError: state.error };

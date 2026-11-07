@@ -1,17 +1,16 @@
 # Verification
 
 Every claim below was produced by a command in this repository. The date is the run recorded on
-2026-11-06, OpenClaw `2026.11.1`, Node `24.22.1`, Linux `6.18.57` (x86_64). The model-driven run was
-re-recorded on 2026-11-07 with the same versions.
+2026-11-07, OpenClaw `2026.11.1`, Node `24.22.1`, Linux `6.18.57` (x86_64).
 
 ## What the layers prove
 
 | Layer | Command | Proves |
 | --- | --- | --- |
-| Unit and in-process transport | `npm test` | Paths, scanning, digests, framing, config, push/artifact/status against real node handlers over a real ordered channel with real files. |
+| Unit and in-process transport | `npm test` | Paths, scanning, digests, framing, config, incremental publish, return plan, push/artifact/status/tree/return against real node handlers over a real ordered channel with real files. |
 | Build | `npm run build` + `npm run typecheck` | The published `dist/` exists, typechecks strictly, and every runtime import is declared. |
-| Real plugin loader | `bash scripts/pack-and-inspect.sh` | The npm-pack tarball installs into a disposable state, the real loader reports `status: "loaded"`, and the three tools are registered. |
-| Two-process tool path | `bash scripts/integration-isolated.sh` | A real Gateway and node host pair; the registered tools are invoked through `tools.invoke`, publish over duplex frames, refuse an occupied destination, fetch an artifact exclusively, and status verifies the published tree. |
+| Real plugin loader | `bash scripts/pack-and-inspect.sh` | The npm-pack tarball installs into a disposable state, the real loader reports `status: "loaded"`, and all five tools are registered. |
+| Two-process tool path | `bash scripts/integration-isolated.sh` | A real Gateway and node host pair; the registered tools are invoked through `tools.invoke`, publish over duplex frames, refuse an occupied destination, fetch an artifact exclusively, preview and return a generated file into the local project, and status verifies the published tree. |
 | Model-driven turn | `bash scripts/e2e-model-driven.sh` | One agent turn, driven through streaming chat completions, calls `node_workspace_push`, then native `exec` with `host=node` and the returned cwd, then `node_workspace_artifact`; the node stdout shows the pushed cwd and the fetched bytes match on both sides. |
 
 ## Results
@@ -19,30 +18,32 @@ re-recorded on 2026-11-07 with the same versions.
 `npm test`:
 
 ```
-ℹ tests 59
-ℹ pass 59
+ℹ tests 84
+ℹ pass 84
 ℹ fail 0
 ```
 
 `bash scripts/pack-and-inspect.sh`:
 
 ```
-loaded node-workspace with tools node_workspace_push, node_workspace_artifact, node_workspace_status
+loaded node-workspace with tools node_workspace_push, node_workspace_artifact, node_workspace_status, node_workspace_changes, node_workspace_return
 PASS: plugin installed and loaded in isolated state /tmp/nodews-loader-…
 ```
 
-`bash scripts/integration-isolated.sh` (recorded at `841aacf`; not rerun after the final fsync/symlink/marker-bound fixes):
+`bash scripts/integration-isolated.sh` (rerun on 2026-11-07 with the incremental and return stages):
 
 ```
 gateway listening on …
-node advertised nodews.fetch, nodews.push, nodews.status
+node advertised nodews.fetch, nodews.push, nodews.return, nodews.status, nodews.tree
 status payload verified
 created 6 files ... published tree matches the source
 coded refusal reached the tool result and the destination stayed untouched
 artifact bytes verified ...
 existing artifact refused with a coded result and left untouched
 status verifies the plugin-owned tree with the published digest
-PASS: plugin tools pushed, refused an unsafe second publish, fetched an artifact and verified the tree across the real Gateway/node boundary
+preview reports the generated addition without writing
+generated file returned through the real Gateway/node boundary
+PASS: plugin tools pushed, refused an unsafe second publish, fetched an artifact, returned a generated file and verified the tree across the real Gateway/node boundary
 ```
 
 `bash scripts/e2e-model-driven.sh` (2026-11-07):
@@ -100,6 +101,18 @@ The first review found defects that the original suite missed. Each now has a re
 | Status verification and `parentExists` | `status reports verified content and drift after modification`, `status reports parentExists only for allowed paths` |
 
 ## What is not proven
+
+- **Same-UID atomicity.** The local return re-checks parents, digests, and destinations immediately
+  before each write and rolls back on failure, but Node lacks an openat/renameat2-with-expected-inode
+  primitive. A deliberate same-user process racing the apply window is not contained; see Security.
+- **A process kill during the local apply window.** The return stream is staged first, so a
+  disconnect is safe; a SIGKILL between two local renames can still leave a partial project and a
+  stale `.nodews-return-*` directory. Recovery is a fresh preview, not automatic cleanup.
+- **Large trees.** The suites use small trees and 1 KiB chunks; the 2000-entry/256 MiB limits are
+  unit tested, not load tested. A local project above the limits fails closed until `exclude`
+  narrows it.
+- **Rollback under injected I/O failure.** Rollback is exercised by construction and unit paths, but
+  a real mid-apply ENOSPC/EIO injection is not part of the gate.
 
 - **A hosted model's tool choice.** The model in `e2e-model-driven.sh` is a scripted
   OpenAI-compatible test double: the HTTP path, the agent loop, tool dispatch, and every side effect

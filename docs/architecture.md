@@ -41,8 +41,9 @@ the native `exec` tool, which retains its own approvals and node allowlists.
 | `src/paths.ts` | Absolute-path, relative-path, traversal, and marker-name rules. |
 | `src/frames.ts` | Binary frame codec (one control byte + JSON or file bytes). |
 | `src/transport.ts` | `FrameSession`: ordered frame queue, timeouts, closure semantics. |
-| `src/gateway/*` | Tool definitions, push/artifact/status engines, runtime adapter. |
-| `src/node/*` | Node command handlers and no-clobber filesystem helpers. |
+| `src/gateway/*` | Tool definitions, push/artifact/status/return engines, runtime adapter. |
+| `src/return-plan.ts` | Pure comparison of a node manifest, a local manifest and a base manifest; plan digest. |
+| `src/node/*` | Node command handlers, framed-session helpers and no-clobber filesystem helpers. |
 
 The commands declare `hasActiveWork: () => false` because all work is confined to `handle()`. The
 node host separately tracks in-flight invocations, so this does not claim idleness while a call is
@@ -68,25 +69,64 @@ protocol rather than an archive:
    default. The tree digest is the SHA-256 of the canonical manifest JSON.
 2. **Derive the push id.** `pushId = SHA-256(nodeId + "\n" + remotePath + "\n" + treeDigest)[0..32]`.
    Same content to the same destination is idempotent; different content is not.
-3. **Open the channel.** `openDuplex` with `nodews.push`, an idempotency key equal to the push id,
+3. **Resolve an optional base.** With `incrementalFrom`, the Gateway calls `nodews.status` on the
+   base and requires `owned: true, complete: true, verified: true`. It records the base manifest and
+   marks every file whose size, SHA-256, and executable bit are unchanged for reuse. The base is
+   read-only and must differ from the new destination.
+4. **Open the channel.** `openDuplex` with `nodews.push`, an idempotency key equal to the push id,
    the configured timeout, and the caller's abort signal.
-4. **Claim and negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes,
-   and digest. The node validates protocol version 2, every path, limits, and the destination
-   parent. It then claims the destination with `mkdir(2)`: an existing file, symlink, or directory
-   (including an empty one) makes that call fail with `EEXIST`, so nothing is ever replaced. Only
-   after the claim does it write an `incomplete` marker and accept.
-5. **Transfer.** For each file the Gateway sends a `file` header and then exactly `size` bytes in
-   `chunkBytes` chunks. The node writes directly into the claimed directory, creating files with
-   `O_EXCL`/`wx`, and acknowledges each file only after its digest matches.
-6. **Verify and finalize.** On `end` the node checks that every manifest file arrived, re-hashes the
-   tree from disk, recomputes the tree digest, atomically replaces the marker with
-   `state: "complete"`, fsyncs every directory, and only then acknowledges success.
-7. **Confirm.** The node fsyncs the destination parent, then sends `result` with the digest, file
+5. **Claim and negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes,
+   digest, and, for an incremental publish, the base path, digest, and reuse list. The node
+   validates protocol version 3, every path, limits, the destination parent, and the base
+   publication before claiming. It then claims the destination with `mkdir(2)`: an existing file,
+   symlink, or directory (including an empty one) makes that call fail with `EEXIST`, so nothing is
+   ever replaced. Only after the claim does it write an `incomplete` marker and accept.
+6. **Reuse unchanged files.** For every reuse path, the node independently checks the base marker,
+   copies the file with `COPYFILE_EXCL`, applies the owner-only mode, and re-hashes the copy against
+   the incoming manifest. A base that changed after verification fails with `destination-drifted`.
+   No byte of a reused file crosses the channel.
+7. **Transfer.** For each changed file the Gateway sends a `file` header and then exactly `size`
+   bytes in `chunkBytes` chunks. The node writes directly into the claimed directory, creating files
+   with `O_EXCL`/`wx`, and acknowledges each file only after its digest matches. The node enforces
+   manifest order across reused and sent entries.
+8. **Verify and finalize.** On `end` the node checks that every manifest file arrived (sent or
+   reused), re-hashes the tree from disk, recomputes the tree digest, atomically replaces the marker
+   with `state: "complete"`, fsyncs every directory, and only then acknowledges success.
+9. **Confirm.** The node fsyncs the destination parent, then sends `result` with the digest, file
    count, and byte count. The Gateway compares these against what it scanned before returning.
 
 The destination name is never renamed over: `mkdir(2)` is the no-clobber primitive. The trade-off
 is visibility: the claimed directory appears before its files finish arriving. A reader can see an
 incomplete publication; the marker's `state` and `node_workspace_status` make that explicit.
+
+## Return lifecycle
+
+A return reads a node directory and writes only the local changes an explicit plan selected.
+
+1. **Read the node tree.** `node_workspace_changes` calls `nodews.tree`, which resolves a real
+   directory inside `node.returnRoots`, scans it without following links, hashes every file, and
+   returns an independent manifest plus the plugin marker for that directory.
+2. **Scan the local project.** The Gateway scans the local target inside `gateway.returnRoots` with
+   the same limits, skipping symlinks and excluding the caller's patterns. It never writes.
+3. **Build a plan.** For every selected node file: absent locally is an addition; identical is
+   unchanged; a different executable bit alone is a mode change; different content is a safe
+   modification only when the local content still matches the base manifest written by the last
+   publication. Everything else is a conflict. Local files absent on the node are reported as
+   removals and are never deleted. The plan digest covers every operation, conflict, removal, the
+   node tree digest, and both paths.
+4. **Re-derive and pin.** `node_workspace_return` requires the plan digest. It re-runs the preview;
+   a different digest is `plan-stale` and nothing is written. Conflicts are `local-conflict`.
+5. **Stage and verify.** The node re-scans its tree and refuses a tree digest that changed since the
+   preview. It streams only the selected additions and modifications. The Gateway writes them into a
+   private `.nodews-return-<id>` staging directory inside the local project, verifies every size and
+   SHA-256, and requires the node's `end` frame.
+6. **Apply with rollback.** After the stream ends, every add target must still be absent, every
+   modify target must still be a regular file whose digest equals the base, and every parent must be
+   a real directory. Additions use an exclusive link or copy; modifications copy the current file to
+   a staging backup, re-check its digest, then rename the staged file over it atomically. A failure
+   restores backups, removes files this call created, and removes created empty directories.
+7. **Report.** The result lists applied paths, the unchanged count, and the paths that exist only on
+   the node. It never deletes a local file and never modifies the node tree.
 
 ## Artifact lifecycle
 
@@ -132,9 +172,12 @@ against a node operator who deliberately fabricates a consistent tree.
 
 ## What is deliberately absent
 
-- No incremental transfer or delta protocol. Every push sends the selected tree.
-- No replace and no delete. A destination must be new; updating means publishing to a new path and
-  retiring the old one yourself. This removes the destructive swap window entirely.
+- No in-place replace and no delete. A destination must be new; an incremental publish creates a
+  new generation and reuses files from an earlier one. Retiring a generation is the operator's
+  decision. This removes the destructive swap window entirely.
+- No watcher. Both directions are explicit calls; the plugin does not observe file changes.
+- No return of arbitrary subpaths outside the selected node directory, and no deletion on either
+  side.
 - No Rust sidecar or native helper. The plugin runs inside Node on both sides, and a second toolchain
   would add build and packaging surface without changing a filesystem operation that Node already
   performs.

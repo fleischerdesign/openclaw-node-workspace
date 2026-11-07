@@ -8,6 +8,7 @@ import { NodeWorkspaceError, errorMessage } from "../errors.js";
 import { scanWorkspace, type ScanResult } from "../manifest.js";
 import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_PUSH, PROTOCOL_VERSION } from "../protocol.js";
+import { workspaceStatus } from "./status.js";
 import {
   assertControlFrame,
   controlType,
@@ -28,6 +29,8 @@ export interface PushInput {
   readonly node: string;
   readonly localPath: string;
   readonly remotePath: string;
+  /** A previously published generation whose unchanged files are reused on the node. */
+  readonly incrementalFrom: string | undefined;
   readonly exclude: readonly string[] | undefined;
   readonly signal: AbortSignal | undefined;
   readonly progress: ((progress: PushProgress) => void) | undefined;
@@ -41,6 +44,10 @@ export interface PushOutcome {
   readonly digest: string;
   readonly files: number;
   readonly bytes: number;
+  /** Files copied on the node from the incremental base, never on the wire. */
+  readonly reusedFiles: number;
+  readonly reusedBytes: number;
+  readonly transferredBytes: number;
   readonly durationMs: number;
   readonly skipped: readonly { readonly path: string; readonly reason: "symlink" | "excluded" }[];
 }
@@ -138,6 +145,48 @@ export async function pushWorkspace(
   });
   checkAborted(input.signal);
 
+  let base: { remotePath: string; digest: string } | undefined;
+  const reuse = new Set<string>();
+  let reusedBytes = 0;
+  if (input.incrementalFrom !== undefined) {
+    const basePath = normalizeAbsolutePosixPath(input.incrementalFrom);
+    if (basePath === remotePath) {
+      throw new NodeWorkspaceError("conflict", "the incremental base must differ from the new destination");
+    }
+    const status = await workspaceStatus(transport, config, {
+      node: nodeId,
+      remotePath: basePath,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    if (!status.exists || !status.owned || !status.complete || !status.verified) {
+      throw new NodeWorkspaceError(
+        "conflict",
+        `incremental base ${basePath} is not a complete, verified node-workspace publication` +
+          (status.drift ? `: ${status.drift}` : ""),
+        { remotePath: basePath },
+      );
+    }
+    const marker = status.marker;
+    if (!marker || marker.manifest === undefined || marker.directories === undefined) {
+      throw new NodeWorkspaceError("conflict", `incremental base ${basePath} has no verifiable manifest`);
+    }
+    base = { remotePath: basePath, digest: marker.digest };
+    const baseFiles = new Map(marker.manifest.map((entry) => [entry.path, entry]));
+    for (const entry of scan.files) {
+      const previous = baseFiles.get(entry.path);
+      if (
+        previous !== undefined &&
+        previous.size === entry.size &&
+        previous.sha256 === entry.sha256 &&
+        previous.executable === entry.executable
+      ) {
+        reuse.add(entry.path);
+        reusedBytes += entry.size;
+      }
+    }
+  }
+  checkAborted(input.signal);
+
   const pushId = derivePushId(nodeId, remotePath, scan.treeDigest);
   let session: FrameSession | undefined;
   let accepted = false;
@@ -168,6 +217,7 @@ export async function pushWorkspace(
       treeDigest: scan.treeDigest,
       manifest: scan.files,
       directories: scan.directories,
+      ...(base ? { base, reuse: [...reuse] } : {}),
     });
 
     const accept = async (): Promise<Record<string, unknown> | undefined> => {
@@ -210,14 +260,17 @@ export async function pushWorkspace(
         digest: scan.treeDigest,
         files: scan.files.length,
         bytes: scan.totalBytes,
+        reusedFiles: reuse.size,
+        reusedBytes,
+        transferredBytes: scan.totalBytes - reusedBytes,
         durationMs: Date.now() - startedAt,
         skipped: scan.skipped,
       };
     }
 
-    let bytesDone = 0;
+    let bytesDone = reusedBytes;
     let lastProgressAt = 0;
-    let filesDone = 0;
+    let filesDone = reuse.size;
     const report = (phase: PushProgress["phase"], force = false): void => {
       const now = Date.now();
       if (!force && now - lastProgressAt < 150) return;
@@ -226,6 +279,7 @@ export async function pushWorkspace(
     };
 
     for (const entry of scan.files) {
+      if (reuse.has(entry.path)) continue;
       checkAborted(input.signal);
       if (Date.now() >= deadline) throw new NodeWorkspaceError("timeout", "the push exceeded its time limit");
       await session.sendControl({ t: "file", path: entry.path });
@@ -321,6 +375,9 @@ export async function pushWorkspace(
           digest: scan.treeDigest,
           files: scan.files.length,
           bytes: scan.totalBytes,
+          reusedFiles: reuse.size,
+          reusedBytes,
+          transferredBytes: scan.totalBytes - reusedBytes,
           durationMs: Date.now() - startedAt,
           skipped: scan.skipped,
         };

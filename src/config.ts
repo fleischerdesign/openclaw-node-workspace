@@ -9,6 +9,8 @@ export interface GatewayConfig {
   readonly localRoots: readonly string[];
   /** Absolute directories an artifact may be written into. Empty denies every fetch. */
   readonly artifactRoots: readonly string[];
+  /** Absolute directories a returned project tree may be written into. Empty denies every return. */
+  readonly returnRoots: readonly string[];
   readonly exclude: readonly string[];
   readonly symlinks: SymlinkPolicy;
   readonly maxFiles: number;
@@ -24,6 +26,8 @@ export interface NodeConfig {
   readonly pushRoots: readonly string[];
   /** Absolute directories an artifact may be read from. Empty denies every fetch. */
   readonly artifactRoots: readonly string[];
+  /** Absolute directories a project tree may be returned from. Empty denies every return. */
+  readonly returnRoots: readonly string[];
   readonly maxFiles: number;
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
@@ -116,6 +120,7 @@ export function resolvePluginConfig(raw: unknown): PluginConfig {
     gateway: {
       localRoots: absoluteRoots(gateway.localRoots, "gateway.localRoots"),
       artifactRoots: absoluteRoots(gateway.artifactRoots, "gateway.artifactRoots"),
+      returnRoots: absoluteRoots(gateway.returnRoots, "gateway.returnRoots"),
       exclude: stringArray(gateway.exclude, "gateway.exclude"),
       symlinks: symlinksRaw,
       maxFiles,
@@ -132,6 +137,7 @@ export function resolvePluginConfig(raw: unknown): PluginConfig {
     node: {
       pushRoots: absoluteRoots(node.pushRoots, "node.pushRoots"),
       artifactRoots: absoluteRoots(node.artifactRoots, "node.artifactRoots"),
+      returnRoots: absoluteRoots(node.returnRoots, "node.returnRoots"),
       maxFiles: nodeMaxFiles,
       maxFileBytes: nodeMaxFileBytes,
       maxTotalBytes: nodeMaxTotalBytes,

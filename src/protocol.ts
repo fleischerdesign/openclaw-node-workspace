@@ -1,20 +1,56 @@
 import type { ManifestEntry } from "./digest.js";
 import { NodeWorkspaceError } from "./errors.js";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const COMMAND_PUSH = "nodews.push";
 export const COMMAND_FETCH = "nodews.fetch";
 export const COMMAND_STATUS = "nodews.status";
+export const COMMAND_TREE = "nodews.tree";
+export const COMMAND_RETURN = "nodews.return";
+
+/**
+ * A previously published generation used as the delta base for a new publish.
+ *
+ * The base is never modified. Unchanged files are copied on the node from this
+ * directory into the newly claimed destination, so only changed bytes cross
+ * the channel.
+ */
+export interface PushBase {
+  readonly remotePath: string;
+  readonly digest: string;
+}
+
+export interface TreeRequest {
+  readonly remotePath: string;
+}
+
+/**
+ * Ask the node to stream the selected files of one directory back to the
+ * Gateway. `treeDigest` pins the scanned node tree; `planDigest` pins the
+ * Gateway-side plan (including local conflict decisions).
+ */
+export interface ReturnHello {
+  readonly t: "hello";
+  readonly protocol: 3;
+  readonly remotePath: string;
+  readonly paths: readonly string[];
+  readonly treeDigest: string;
+  readonly planDigest: string;
+}
 
 export interface PushHello {
   readonly t: "hello";
-  readonly protocol: 2;
+  readonly protocol: 3;
   readonly pushId: string;
   readonly remotePath: string;
   readonly totalBytes: number;
   readonly treeDigest: string;
   readonly manifest: readonly ManifestEntry[];
   readonly directories: readonly string[];
+  /** Present only for an incremental publish; the base stays untouched. */
+  readonly base?: PushBase;
+  /** Manifest paths copied from the base instead of being sent. */
+  readonly reuse?: readonly string[];
 }
 
 export interface FetchRequest {
@@ -47,7 +83,17 @@ export type NodeControl =
     }
   | { readonly t: "meta"; readonly size: number; readonly sha256: string | null; readonly mode: number }
   | { readonly t: "done"; readonly sha256: string; readonly bytes: number }
-  | { readonly t: "fetch-error"; readonly code: string; readonly message: string };
+  | { readonly t: "fetch-error"; readonly code: string; readonly message: string }
+  | { readonly t: "accepted"; readonly treeDigest: string }
+  | {
+      readonly t: "file";
+      readonly path: string;
+      readonly size: number;
+      readonly sha256: string;
+      readonly executable: boolean;
+    }
+  | { readonly t: "end"; readonly treeDigest: string; readonly files: number; readonly bytes: number }
+  | { readonly t: "return-error"; readonly code: string; readonly message: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,6 +155,57 @@ export function parsePushHello(value: unknown): PushHello {
     treeDigest: requireString(value.treeDigest, "hello.treeDigest"),
     manifest: value.manifest.map(parseManifestEntry),
     directories: value.directories as string[],
+    ...parseBaseAndReuse(value),
+  };
+}
+
+function parseBaseAndReuse(value: Record<string, unknown>): { base?: PushBase; reuse?: string[] } {
+  const reuse: string[] = [];
+  if (value.reuse !== undefined) {
+    if (!Array.isArray(value.reuse)) throw new NodeWorkspaceError("protocol", "hello.reuse must be an array");
+    for (const entry of value.reuse) {
+      reuse.push(requireString(entry, "hello.reuse entry"));
+    }
+  }
+  if (value.base === undefined) {
+    if (reuse.length > 0) {
+      throw new NodeWorkspaceError("protocol", "hello.reuse requires hello.base");
+    }
+    return {};
+  }
+  if (!isRecord(value.base)) throw new NodeWorkspaceError("protocol", "hello.base must be an object");
+  const remotePath = requireString(value.base.remotePath, "hello.base.remotePath");
+  const digest = requireString(value.base.digest, "hello.base.digest");
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw new NodeWorkspaceError("protocol", "hello.base.digest must be lowercase SHA-256 hex");
+  }
+  return { base: { remotePath, digest }, reuse };
+}
+
+export function parseReturnHello(value: unknown): ReturnHello {
+  if (!isRecord(value) || value.t !== "hello") {
+    throw new NodeWorkspaceError("protocol", "expected a return hello control frame");
+  }
+  if (value.protocol !== PROTOCOL_VERSION) {
+    throw new NodeWorkspaceError("protocol", "unsupported protocol version " + String(value.protocol));
+  }
+  if (!Array.isArray(value.paths)) throw new NodeWorkspaceError("protocol", "hello.paths must be an array");
+  const paths = value.paths.map((entry) => requireString(entry, "hello.paths entry"));
+  const treeDigest = requireString(value.treeDigest, "hello.treeDigest");
+  const planDigest = requireString(value.planDigest, "hello.planDigest");
+  if (!/^[0-9a-f]{64}$/.test(treeDigest)) {
+    throw new NodeWorkspaceError("protocol", "hello.treeDigest must be lowercase SHA-256 hex");
+  }
+  if (!/^[0-9a-f]{64}$/.test(planDigest)) {
+    throw new NodeWorkspaceError("protocol", "hello.planDigest must be lowercase SHA-256 hex");
+  }
+  return {
+    t: "hello",
+    protocol: PROTOCOL_VERSION,
+    remotePath: requireString(value.remotePath, "hello.remotePath"),
+    paths,
+    treeDigest,
+    planDigest,
   };
 }
 

@@ -258,6 +258,20 @@ export function validateManifestShape(hello: PushHello, limits: ManifestLimits):
   if (totalBytes !== hello.totalBytes) {
     throw new NodeWorkspaceError("invalid-manifest", "hello.totalBytes does not match the manifest");
   }
+  if (hello.reuse !== undefined) {
+    const files = new Set(hello.manifest.map((entry) => entry.path));
+    const seenReuse = new Set<string>();
+    for (const reusePath of hello.reuse) {
+      assertSafeRelativePath(reusePath, "reuse path");
+      if (!files.has(reusePath)) {
+        throw new NodeWorkspaceError("invalid-manifest", `reuse path is not a manifest file: ${reusePath}`);
+      }
+      if (seenReuse.has(reusePath)) {
+        throw new NodeWorkspaceError("invalid-manifest", `duplicate reuse path ${reusePath}`);
+      }
+      seenReuse.add(reusePath);
+    }
+  }
   const markerBytes = Buffer.byteLength(
     JSON.stringify({ manifest: hello.manifest, directories: hello.directories }),
     "utf8",

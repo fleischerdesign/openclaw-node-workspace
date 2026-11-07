@@ -106,6 +106,45 @@ export async function assertDestinationAllowed(
   return normalized;
 }
 
+/**
+ * Resolve an existing directory inside a configured return root.
+ *
+ * A return reads a whole tree, so the directory itself must be real: a
+ * symlinked root would let the Gateway read outside the operator's intent.
+ */
+export async function resolveReturnSource(
+  remotePath: string,
+  returnRoots: readonly string[],
+): Promise<{ readonly directory: string; readonly root: string }> {
+  if (returnRoots.length === 0) {
+    throw new NodeWorkspaceError("node-not-configured", "node.returnRoots is empty; no project tree is readable");
+  }
+  const normalized = normalizeAbsolutePosixPath(remotePath);
+  let stat;
+  try {
+    stat = await fs.lstat(normalized);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) throw new NodeWorkspaceError("path-not-found", `directory does not exist: ${normalized}`);
+    throw new NodeWorkspaceError("io", `cannot inspect ${normalized}: ${errorMessage(error)}`, {}, { cause: error });
+  }
+  if (stat.isSymbolicLink()) {
+    throw new NodeWorkspaceError("symlink-rejected", `return source must not be a symlink: ${normalized}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new NodeWorkspaceError("not-a-directory", `return source is not a directory: ${normalized}`);
+  }
+  const real = await fs.realpath(normalized);
+  const roots = await realRoots(returnRoots);
+  const match = roots.find((root) => isWithin(root, real));
+  if (match === undefined) {
+    throw new NodeWorkspaceError(
+      "path-outside-root",
+      `return source ${real} is outside every configured node.returnRoots entry`,
+    );
+  }
+  return { directory: real, root: match };
+}
+
 /** Resolve an existing regular file inside an artifact root. */
 export async function resolveArtifactSource(
   remotePath: string,

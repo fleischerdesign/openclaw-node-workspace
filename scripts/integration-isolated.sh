@@ -182,7 +182,7 @@ const gateway = {
     bind: "loopback",
     port: Number(port),
     auth: { mode: "none" },
-    nodes: { commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] } },
+    nodes: { commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status", "nodews.tree", "nodews.return"] } },
   },
   plugins: {
     entries: {
@@ -191,6 +191,7 @@ const gateway = {
           gateway: {
             localRoots: [path.join(work, "gateway-root", "src")],
             artifactRoots: [path.join(work, "gateway-root", "artifacts")],
+            returnRoots: [path.join(work, "gateway-root", "src")],
           },
         },
       },
@@ -205,6 +206,7 @@ const node = {
           node: {
             pushRoots: [path.join(work, "node-root")],
             artifactRoots: [path.join(work, "node-root")],
+            returnRoots: [path.join(work, "node-root")],
           },
         },
       },
@@ -233,7 +235,7 @@ echo "gateway listening on $PORT"
 
 stage "start node host"
 setsid "$WORK/isolated" node openclaw node run --host 127.0.0.1 --port "$PORT" --no-tls --display-name "integration-node" \
-  --commands nodews.push,nodews.fetch,nodews.status >"$WORK/node.log" 2>&1 &
+  --commands nodews.push,nodews.fetch,nodews.status,nodews.tree,nodews.return >"$WORK/node.log" 2>&1 &
 NODE_PID=$!
 
 stage "wait for pairing"
@@ -257,7 +259,7 @@ const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const rows = report.paired ?? report.nodes ?? report;
 const node = rows.find((entry) => entry.displayName === "integration-node");
-for (const command of ["nodews.push", "nodews.fetch", "nodews.status"]) {
+for (const command of ["nodews.push", "nodews.fetch", "nodews.status", "nodews.tree", "nodews.return"]) {
   if (!node.commands.includes(command)) throw new Error(`node did not advertise ${command}`);
 }
 console.log(`node advertised ${node.commands.join(", ")}`);
@@ -435,4 +437,45 @@ if (details?.marker?.pushId !== push.output?.details?.pushId) throw new Error("s
 console.log("status verifies the plugin-owned tree with the published digest");
 NODE
 
-echo "PASS: plugin tools pushed, refused an unsafe second publish, fetched an artifact and verified the tree across the real Gateway/node boundary"
+stage "preview and return a generated project file through the plugin tools"
+printf 'generated on the node\n' > "$REMOTE_APP/generated.txt"
+CHANGES_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:process.argv[1],remotePath:process.argv[2],localPath:process.argv[3]}))' \
+  "$NODE_ID" "$REMOTE_APP" "$WORK/gateway-root/src")"
+tool_call node_workspace_changes "$CHANGES_ARGS" "$WORK/tool-changes.json"
+cat "$WORK/tool-changes.json"
+
+node - "$WORK/tool-changes.json" <<'NODE'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) throw new Error(`changes tool failed: ${JSON.stringify(report.error ?? report)}`);
+const details = report.output?.details;
+if (details?.counts?.additions !== 1) throw new Error(`expected one addition, got ${String(details?.counts?.additions)}`);
+if (details?.counts?.conflicts !== 0) throw new Error("preview reported a conflict");
+if (typeof details?.planDigest !== "string") throw new Error("preview did not return a planDigest");
+if (details?.operations?.some((entry) => entry.path === "generated.txt" && entry.kind === "add") !== true) {
+  throw new Error("preview does not list generated.txt as an addition");
+}
+console.log("preview reports the generated addition without writing");
+NODE
+
+RETURN_ARGS="$(node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(JSON.stringify({node:process.argv[2],remotePath:process.argv[3],localPath:process.argv[4],planDigest:j.output.details.planDigest}))' \
+  "$WORK/tool-changes.json" "$NODE_ID" "$REMOTE_APP" "$WORK/gateway-root/src")"
+tool_call node_workspace_return "$RETURN_ARGS" "$WORK/tool-return.json"
+cat "$WORK/tool-return.json"
+
+node - "$WORK/tool-return.json" "$WORK" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.ok !== true) throw new Error(`return tool failed: ${JSON.stringify(report.error ?? report)}`);
+const details = report.output?.details;
+if (details?.applied?.length !== 1 || details.applied[0]?.path !== "generated.txt") {
+  throw new Error(`unexpected applied set: ${JSON.stringify(details?.applied)}`);
+}
+const local = path.join(process.argv[3], "gateway-root", "src", "generated.txt");
+if (fs.readFileSync(local, "utf8") !== "generated on the node\n") throw new Error("returned bytes differ");
+if ((fs.statSync(local).mode & 0o077) !== 0) throw new Error("returned file has group/other permissions");
+console.log("generated file returned through the real Gateway/node boundary");
+NODE
+
+echo "PASS: plugin tools pushed, refused an unsafe second publish, fetched an artifact, returned a generated file and verified the tree across the real Gateway/node boundary"

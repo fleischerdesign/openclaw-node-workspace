@@ -8,7 +8,13 @@ import { TransferProgressStore, type TransferScope } from "./gateway/progress-st
 import { createNodeTransport } from "./gateway/transport.js";
 import { createTools } from "./gateway/tools.js";
 import { createNodeCommands } from "./node/commands.js";
-import { COMMAND_FETCH, COMMAND_PUSH, COMMAND_STATUS } from "./protocol.js";
+import {
+  COMMAND_FETCH,
+  COMMAND_PUSH,
+  COMMAND_RETURN,
+  COMMAND_STATUS,
+  COMMAND_TREE,
+} from "./protocol.js";
 
 const PLUGIN_ID = "node-workspace";
 
@@ -98,8 +104,8 @@ export default definePluginEntry({
       },
     });
 
-    api.registerTool((context) => {
-      const scope: TransferScope | undefined = context.sessionKey
+    api.registerTool((context?: { sessionKey?: string; agentId?: string }) => {
+      const scope: TransferScope | undefined = context?.sessionKey
         ? {
             sessionKey: context.sessionKey,
             ...(context.agentId ? { agentId: context.agentId } : {}),
@@ -113,6 +119,15 @@ export default definePluginEntry({
         progress,
         onProgressChange: notify,
       });
+    }, {
+      names: [
+        "node_workspace_push",
+        "node_workspace_artifact",
+        "node_workspace_status",
+        "node_workspace_changes",
+        "node_workspace_return",
+      ],
+      workspaceAccess: false,
     });
 
     const node = createNodeCommands(api.pluginConfig);
@@ -121,7 +136,7 @@ export default definePluginEntry({
     }
 
     api.registerNodeInvokePolicy({
-      commands: [COMMAND_PUSH, COMMAND_FETCH, COMMAND_STATUS],
+      commands: [COMMAND_PUSH, COMMAND_FETCH, COMMAND_STATUS, COMMAND_TREE, COMMAND_RETURN],
       dangerous: true,
       handle: (context) => context.invokeNode(),
     });

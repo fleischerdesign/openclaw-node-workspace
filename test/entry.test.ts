@@ -10,7 +10,7 @@ import entry from "../src/index.js";
 import { createNodeCommands } from "../src/node/commands.js";
 import { createHarness } from "./helpers/sim.js";
 
-test("the plugin registers its three tools, three node commands and one invoke policy", async () => {
+test("the plugin registers its five tools, five node commands and one invoke policy", async () => {
   const raw = {
     gateway: { localRoots: [os.tmpdir()] },
     node: { pushRoots: [os.tmpdir()] },
@@ -53,10 +53,22 @@ test("the plugin registers its three tools, three node commands and one invoke p
   };
 
   entry.register(api as unknown as OpenClawPluginApi);
-  assert.deepEqual(tools.sort(), ["node_workspace_artifact", "node_workspace_push", "node_workspace_status"]);
-  assert.deepEqual(commands.sort(), ["nodews.fetch", "nodews.push", "nodews.status"]);
+  assert.deepEqual(tools.sort(), [
+    "node_workspace_artifact",
+    "node_workspace_changes",
+    "node_workspace_push",
+    "node_workspace_return",
+    "node_workspace_status",
+  ]);
+  assert.deepEqual(commands.sort(), ["nodews.fetch", "nodews.push", "nodews.return", "nodews.status", "nodews.tree"]);
   assert.equal(policies.length, 1);
-  assert.deepEqual(policies[0]?.commands, ["nodews.push", "nodews.fetch", "nodews.status"]);
+  assert.deepEqual(policies[0]?.commands, [
+    "nodews.push",
+    "nodews.fetch",
+    "nodews.status",
+    "nodews.tree",
+    "nodews.return",
+  ]);
   assert.equal(policies[0]?.dangerous, true);
 
   const manifest = JSON.parse(

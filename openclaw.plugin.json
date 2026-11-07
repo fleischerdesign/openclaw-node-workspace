@@ -1,7 +1,7 @@
 {
   "id": "node-workspace",
   "name": "Node Workspace",
-  "description": "One-way publication of an explicitly selected workspace from the Gateway to a paired node, plus selected artifact retrieval.",
+  "description": "Publish an explicitly selected workspace from an OpenClaw Gateway to a paired node, incrementally reuse unchanged files, and return changed or generated project files with a preview.",
   "categories": [
     "developer-tools"
   ],
@@ -9,7 +9,9 @@
     "tools": [
       "node_workspace_push",
       "node_workspace_artifact",
-      "node_workspace_status"
+      "node_workspace_status",
+      "node_workspace_changes",
+      "node_workspace_return"
     ]
   },
   "activation": {
@@ -71,6 +73,12 @@
           "timeoutMs": {
             "type": "integer",
             "minimum": 1000
+          },
+          "returnRoots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -105,13 +113,19 @@
           "maxArtifactBytes": {
             "type": "integer",
             "minimum": 1
+          },
+          "returnRoots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }
     }
   },
   "controlUi": {
-    "entry": "dist/control-ui/bf3160fd2870812697472620c3f163a55f2548a0fcd97703634d0ddde97a24a6/index.js",
+    "entry": "dist/control-ui/1251396743e1342edc37c6dd5331b51407828891d7b5f8435834e66f3c6b09d3/index.js",
     "styles": []
   }
 }

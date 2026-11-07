@@ -18,6 +18,8 @@ export type NodeWorkspaceErrorCode =
   | "timeout"
   | "canceled"
   | "conflict"
+  | "plan-stale"
+  | "local-conflict"
   | "unknown-outcome"
   | "io";
 

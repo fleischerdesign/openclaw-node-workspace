@@ -3,9 +3,20 @@
 ## What is enforced
 
 - **Path authorization.** A Gateway push reads only inside `gateway.localRoots`; an artifact writes
-  only inside `gateway.artifactRoots`; a node push creates only below `node.pushRoots`; a node
-  artifact reads only inside `node.artifactRoots`. Roots are resolved with `realpath`; an empty list
-  denies the operation.
+  only inside `gateway.artifactRoots`; a return writes only inside `gateway.returnRoots`; a node push
+  creates only below `node.pushRoots`; a node artifact reads only inside `node.artifactRoots`; a node
+  tree or return reads only inside `node.returnRoots`. Roots are resolved with `realpath`; an empty
+  list denies the operation.
+- **A return is a previewed, conflict-checked plan.** `node_workspace_return` requires the
+  `planDigest` from `node_workspace_changes` and re-derives the plan. A changed node tree or local
+  tree is `plan-stale`; any local modification since the published base is `local-conflict`. Nothing
+  is written in either case. Additions are created exclusively; modifications re-check the local
+  digest immediately before an atomic replace; a failure rolls back files and directories this call
+  created. No local file is ever deleted.
+- **Returned bytes are staged first.** A return streams into a private `.nodews-return-<id>`
+  directory inside the target project. Every file is verified by size and SHA-256 against the node's
+  manifest, and the local tree is touched only after the node's `end` frame. A disconnect during the
+  stream leaves no local change.
 - **Destinations are new by an atomic claim.** The node claims the name with `mkdir(2)`, which
   fails for an existing file, symlink, or directory, including an empty directory that `rename(2)`
   would have replaced. A marker only allows an `already-applied` answer after the node re-hashes
@@ -32,6 +43,10 @@
   reports `destination-exists`.
 - **Bounded work.** File count, per-file bytes, total bytes, artifact bytes, frame sizes, chunk sizes,
   and time limits are enforced by both sides. A peer cannot make the plugin buffer without bound.
+  A return reuses the same limits for both the node tree and the local project.
+- **Incremental reuse is re-verified on the node.** A base marker is not trusted for content: the
+  node copies each reused file with `COPYFILE_EXCL` and re-hashes it against the incoming manifest.
+  A base that drifted after the Gateway's verification fails with `destination-drifted`.
 - **Explicit node authority.** The commands declare `dangerous: true`. OpenClaw requires a registered
   node-invoke policy, a command allowlist entry, and the node's own advertisement. Installing the
   Gateway plugin alone does not grant a node command.
@@ -62,8 +77,17 @@
   partial tree behind an atomic rename.
 - **No Windows support.** The path rules and publication model are POSIX. A Windows node is not a
   supported target, and the command's `isAvailable` is not used to claim otherwise.
-- **No deletion at all.** The plugin never removes a published directory or a file inside it;
-  replacing content means publishing to a new path out of band.
+- **No deletion at all.** The plugin never removes a published directory or a file inside it, and a
+  return never deletes a local file or a node file. Replacing content means publishing a new
+  generation out of band.
+- **A return's mode changes are owner-only.** A returned file is published as 0600, or 0700 when the
+  node marked it executable. Group and other bits never cross.
+- **Residual same-user race on return.** The local apply re-checks each parent, digest and
+  destination immediately before writing, but Node has no `openat`/`renameat2`-with-expected-inode
+  primitive. A process running as the same local user can still replace a checked parent between the
+  check and the write. The conflict checks and rollback catch the common case, not a deliberate
+  same-UID attacker. Run `returnRoots` under an account that excludes such writers when that
+  matters.
 
 ## Attack and failure matrix
 
@@ -90,6 +114,15 @@
 | Artifact bytes disagree with `done` digest | `integrity`; temporary file removed, destination absent. |
 | Canceled push before acceptance | `canceled`; no effect. |
 | Canceled push after acceptance | `unknown-outcome`; reconcile with status. |
+| Incremental base modified after publication | `destination-drifted` before the new destination is claimed. |
+| Incremental base is not a complete plugin publication | `conflict`; no destination is created. |
+| Return plan used after the node tree changed | `plan-stale`; no local write. |
+| Return plan used after a local file changed | `plan-stale` (plan digest) or `local-conflict` (re-check); no overwrite. |
+| Local file differs from the published base and the node version | `local-conflict`; the file is untouched. |
+| Node tree contains a symlink | `symlink-rejected` by `nodews.tree`; nothing is read. |
+| Return destination already exists and the plan says add | `local-conflict`; nothing is overwritten. |
+| Disconnect during a return stream | The staging directory is removed; no local file changes. |
+| Failure while applying a verified return | Applied additions and replacements are rolled back; the error names rollback failures. |
 
 ## Operator guidance
 

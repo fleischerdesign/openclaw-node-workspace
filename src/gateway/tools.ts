@@ -7,6 +7,7 @@ import { NodeWorkspaceError } from "../errors.js";
 import type { NodeTransport } from "../transport.js";
 import { fetchArtifact } from "./artifact.js";
 import { pushWorkspace, type PushProgress } from "./push.js";
+import { applyReturn, previewReturn, type ReturnProgress } from "./return.js";
 import type { TransferProgressStore, TransferScope } from "./progress-store.js";
 import { workspaceStatus, type StatusOutcome } from "./status.js";
 
@@ -106,29 +107,60 @@ interface PushParams {
   readonly node: string;
   readonly localPath: string;
   readonly remotePath: string;
+  readonly incrementalFrom: string | undefined;
   readonly exclude: readonly string[] | undefined;
+}
+
+function parsePatternArray(value: unknown, label: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 200) {
+    throw new NodeWorkspaceError("path-invalid", `${label} must be an array of at most 200 patterns`);
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 1024) {
+      throw new NodeWorkspaceError("path-invalid", `${label}[${index}] must be a non-empty string`);
+    }
+    return entry;
+  });
+}
+
+interface ReturnParams {
+  readonly node: string;
+  readonly remotePath: string;
+  readonly localPath: string;
+  readonly include: readonly string[] | undefined;
+  readonly exclude: readonly string[] | undefined;
+}
+
+function parseReturnParams(value: unknown, withDigest: boolean): ReturnParams & { planDigest?: string } {
+  const record = requireRecord(value, "return parameters");
+  const planDigest = withDigest ? requireField(record, "planDigest", 64) : undefined;
+  if (withDigest && !/^[0-9a-f]{64}$/.test(planDigest ?? "")) {
+    throw new NodeWorkspaceError("path-invalid", "planDigest must be 64 lowercase hex characters");
+  }
+  return {
+    node: requireField(record, "node", 256),
+    remotePath: requireField(record, "remotePath", 4096),
+    localPath: requireField(record, "localPath", 4096),
+    include: parsePatternArray(record.include, "include"),
+    exclude: parsePatternArray(record.exclude, "exclude"),
+    ...(planDigest ? { planDigest } : {}),
+  };
 }
 
 function parsePushParams(value: unknown): PushParams {
   const record = requireRecord(value, "push parameters");
-  const excludeValue = record.exclude;
-  let exclude: string[] | undefined;
-  if (excludeValue !== undefined) {
-    if (!Array.isArray(excludeValue) || excludeValue.length > 200) {
-      throw new NodeWorkspaceError("path-invalid", "exclude must be an array of at most 200 patterns");
-    }
-    exclude = excludeValue.map((entry, index) => {
-      if (typeof entry !== "string" || entry.length === 0 || entry.length > 1024) {
-        throw new NodeWorkspaceError("path-invalid", `exclude[${index}] must be a non-empty string`);
-      }
-      return entry;
-    });
+  const incrementalValue = record.incrementalFrom;
+  let incrementalFrom: string | undefined;
+  if (incrementalValue !== undefined) {
+    incrementalFrom = requireField(record, "incrementalFrom", 4096);
   }
   return {
     node: requireField(record, "node", 256),
     localPath: requireField(record, "localPath", 4096),
     remotePath: requireField(record, "remotePath", 4096),
-    exclude,
+    incrementalFrom,
+    exclude: parsePatternArray(record.exclude, "exclude"),
   };
 }
 
@@ -161,6 +193,14 @@ const pushParameters = Type.Object(
       description:
         "Absolute POSIX destination directory on the node. It must not exist; this plugin never replaces an existing directory.",
     }),
+    incrementalFrom: Type.Optional(
+      Type.String({
+        minLength: 1,
+        description:
+          "Absolute remotePath of a previous plugin-owned publication to reuse unchanged files from. " +
+          "Only changed bytes cross the channel; the base directory is never modified. The new destination must still be new.",
+      }),
+    ),
     exclude: Type.Optional(
       Type.Array(Type.String({ minLength: 1 }), {
         description: "Additional minimatch patterns relative to the selected workspace root.",
@@ -180,6 +220,9 @@ const pushSuccess = Type.Object(
     digest: Type.String(),
     files: Type.Number(),
     bytes: Type.Number(),
+    reusedFiles: Type.Number(),
+    reusedBytes: Type.Number(),
+    transferredBytes: Type.Number(),
     durationMs: Type.Number(),
     skipped: Type.Number(),
     skippedPaths: Type.Array(Type.String()),
@@ -285,6 +328,120 @@ const statusDetails = Type.Object(
   { additionalProperties: false },
 );
 
+const changesParameters = Type.Object(
+  {
+    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
+    remotePath: Type.String({
+      minLength: 1,
+      description: "Absolute directory on the node to compare and return. Must be inside node.returnRoots.",
+    }),
+    localPath: Type.String({
+      minLength: 1,
+      description: "Absolute local project directory to compare against. Must be inside gateway.returnRoots.",
+    }),
+    include: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), { description: "Optional minimatch patterns to select node paths." }),
+    ),
+    exclude: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), { description: "Optional minimatch patterns to omit on both sides." }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const returnParameters = Type.Object(
+  {
+    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
+    remotePath: Type.String({ minLength: 1, description: "Absolute node directory. Must be inside node.returnRoots." }),
+    localPath: Type.String({ minLength: 1, description: "Absolute local project directory. Must be inside gateway.returnRoots." }),
+    planDigest: Type.String({
+      minLength: 64,
+      maxLength: 64,
+      description: "The planDigest returned by node_workspace_changes. A changed plan is rejected.",
+    }),
+    include: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    exclude: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  },
+  { additionalProperties: false },
+);
+
+const returnPlanEntry = Type.Object(
+  {
+    kind: Type.Union([Type.Literal("add"), Type.Literal("modify"), Type.Literal("chmod")]),
+    path: Type.String(),
+    size: Type.Number(),
+    sha256: Type.String(),
+    executable: Type.Boolean(),
+    baseSha256: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+const returnConflictEntry = Type.Object(
+  {
+    path: Type.String(),
+    reason: Type.String(),
+    localSha256: Type.Optional(Type.String()),
+    baseSha256: Type.Optional(Type.String()),
+    nodeSha256: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+const changesDetails = Type.Object(
+  {
+    ok: Type.Literal(true),
+    nodeId: Type.String(),
+    remotePath: Type.String(),
+    localPath: Type.String(),
+    treeDigest: Type.String(),
+    planDigest: Type.String(),
+    nodeOwned: Type.Boolean(),
+    nodeVerified: Type.Boolean(),
+    drift: Type.Union([Type.String(), Type.Null()]),
+    counts: Type.Object(
+      {
+        additions: Type.Number(),
+        modifications: Type.Number(),
+        modeChanges: Type.Number(),
+        unchanged: Type.Number(),
+        conflicts: Type.Number(),
+        removed: Type.Number(),
+      },
+      { additionalProperties: false },
+    ),
+    operations: Type.Array(returnPlanEntry),
+    conflicts: Type.Array(returnConflictEntry),
+    removed: Type.Array(Type.String()),
+    directories: Type.Array(Type.String()),
+    truncated: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+const returnDetails = Type.Object(
+  {
+    ok: Type.Literal(true),
+    nodeId: Type.String(),
+    localPath: Type.String(),
+    treeDigest: Type.String(),
+    planDigest: Type.String(),
+    applied: Type.Array(
+      Type.Object(
+        { path: Type.String(), kind: Type.Union([Type.Literal("add"), Type.Literal("modify"), Type.Literal("chmod")]) },
+        { additionalProperties: false },
+      ),
+    ),
+    unchanged: Type.Number(),
+    removedOnNode: Type.Array(Type.String()),
+    bytesTransferred: Type.Number(),
+    durationMs: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+
+const MAX_REPORTED_PATHS = 200;
+
 export function createTools(deps: ToolDependencies): AnyAgentTool[] {
   // Deliberately absolute-path only: a relative path would silently depend on
   // whichever workspace the agent happens to run in.
@@ -296,7 +453,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         "Publish one explicitly selected local directory to a paired node over the OpenClaw node channel. " +
         "This is one-way (Gateway to node), verifies every file by SHA-256, and claims a new destination with mkdir(2) before writing. " +
         "It does not run commands: the result returns the node id and remote cwd so you can invoke the native exec tool with host=node yourself. " +
-        "The destination must be new. An existing directory with the same content is reported as already-applied only after its bytes are re-verified; a different directory is a conflict and is never replaced.",
+        "The destination must be new. With incrementalFrom, unchanged files are copied on the node from a previously published generation, so only changed bytes cross the channel; the base is never modified. An existing directory with the same content is reported as already-applied only after its bytes are re-verified; a different directory is a conflict and is never replaced.",
       parameters: pushParameters,
       outputSchema: pushDetails,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
@@ -314,6 +471,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             node: input.node,
             localPath: input.localPath,
             remotePath: input.remotePath,
+            incrementalFrom: input.incrementalFrom,
             exclude: input.exclude,
             signal,
             progress: (progress) => {
@@ -362,6 +520,9 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               digest: outcome.digest,
               files: outcome.files,
               bytes: outcome.bytes,
+              reusedFiles: outcome.reusedFiles,
+              reusedBytes: outcome.reusedBytes,
+              transferredBytes: outcome.transferredBytes,
               durationMs: outcome.durationMs,
               skipped: outcome.skipped.length,
               skippedPaths: outcome.skipped.map((entry) => entry.path),
@@ -502,6 +663,199 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           };
         } catch (error) {
           return toolFailure("node_workspace_status", error, context);
+        }
+      },
+    },
+    {
+      name: "node_workspace_changes",
+      label: "Preview a project tree return from a node",
+      description:
+        "Read-only preview of the files a paired node generated or changed in one directory, compared with a local project directory. " +
+        "Reports additions, safe modifications, mode changes, unchanged files, conflicts, and paths that exist only on the node. " +
+        "It never writes, overwrites, or deletes anything. Pass the returned planDigest to node_workspace_return to apply exactly this plan.",
+      parameters: changesParameters,
+      outputSchema: Type.Union([changesDetails, artifactFailure]),
+      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+        let context: { node?: string; remotePath?: string; localPath?: string } = {};
+        try {
+          const config = requireConfig(deps);
+          const input = parseReturnParams(params, false);
+          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
+          const preview = await previewReturn(deps.transport, config, {
+            node: input.node,
+            remotePath: input.remotePath,
+            localPath: input.localPath,
+            include: input.include,
+            exclude: input.exclude,
+            signal,
+          });
+          const plan = preview.plan;
+          const operations = plan.operations.slice(0, MAX_REPORTED_PATHS).map((entry) => ({
+            kind: entry.kind,
+            path: entry.path,
+            size: entry.size,
+            sha256: entry.sha256,
+            executable: entry.executable,
+            ...(entry.baseSha256 ? { baseSha256: entry.baseSha256 } : {}),
+          }));
+          const conflicts = plan.conflicts.slice(0, MAX_REPORTED_PATHS).map((entry) => ({
+            path: entry.path,
+            reason: entry.reason,
+            ...(entry.localSha256 ? { localSha256: entry.localSha256 } : {}),
+            ...(entry.baseSha256 ? { baseSha256: entry.baseSha256 } : {}),
+            ...(entry.nodeSha256 ? { nodeSha256: entry.nodeSha256 } : {}),
+          }));
+          const truncated =
+            plan.operations.length > MAX_REPORTED_PATHS ||
+            plan.conflicts.length > MAX_REPORTED_PATHS ||
+            plan.removed.length > MAX_REPORTED_PATHS;
+          const counts = plan.counts;
+          const summary =
+            `${counts.additions} addition(s), ${counts.modifications} modification(s), ${counts.modeChanges} mode change(s), ` +
+            `${counts.unchanged} unchanged, ${counts.conflicts} conflict(s), ${counts.removed} path(s) only on the node.`;
+          const conflictText =
+            counts.conflicts === 0
+              ? "No conflicts."
+              : ` Conflicts: ${plan.conflicts
+                  .slice(0, 20)
+                  .map((entry) => `${entry.path} (${entry.reason})`)
+                  .join(", ")}${plan.conflicts.length > 20 ? ", …" : ""}. Resolve them before applying.`;
+          const removedText =
+            counts.removed === 0
+              ? ""
+              : " Paths present only on the node are reported and never deleted locally.";
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Preview returning ${plan.remotePath} on node ${plan.nodeId} into ${plan.localPath}: ${summary}` +
+                  conflictText +
+                  removedText +
+                  ` planDigest ${plan.planDigest}. Apply with node_workspace_return and this digest; a changed plan is rejected.`,
+              },
+            ],
+            details: {
+              ok: true as const,
+              nodeId: plan.nodeId,
+              remotePath: plan.remotePath,
+              localPath: plan.localPath,
+              treeDigest: plan.treeDigest,
+              planDigest: plan.planDigest,
+              nodeOwned: preview.tree.owned,
+              nodeVerified: preview.tree.verified,
+              drift: preview.tree.drift,
+              counts,
+              operations,
+              conflicts,
+              removed: plan.removed.slice(0, MAX_REPORTED_PATHS).map((entry) => entry.path),
+              directories: plan.directories.slice(0, MAX_REPORTED_PATHS),
+              truncated,
+            },
+          };
+        } catch (error) {
+          return toolFailure("node_workspace_changes", error, context);
+        }
+      },
+    },
+    {
+      name: "node_workspace_return",
+      label: "Return changed project files from a node",
+      description:
+        "Apply one previewed node_workspace_changes plan to the local project directory. " +
+        "The planDigest must match a fresh preview exactly; conflicts, a changed node tree, or a locally modified file abort the call before anything is written. " +
+        "Files are staged and verified over the node channel first, then applied with an exclusive create for additions and a re-checked atomic replace for safe modifications. " +
+        "Files removed on the node are reported and never deleted locally. Modes are owner-only (0600 or 0700).",
+      parameters: returnParameters,
+      outputSchema: Type.Union([returnDetails, artifactFailure]),
+      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
+        let context: { node?: string; remotePath?: string; localPath?: string } = {};
+        const transferId = randomUUID();
+        const scope = deps.scope;
+        const tracked = scope && deps.progress ? { scope, store: deps.progress } : undefined;
+        let settled = false;
+        try {
+          const config = requireConfig(deps);
+          const input = parseReturnParams(params, true);
+          if (input.planDigest === undefined) {
+            throw new NodeWorkspaceError("path-invalid", "planDigest is required");
+          }
+          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
+          tracked?.store.begin(tracked.scope, transferId, "return");
+          const outcome = await applyReturn(deps.transport, config, {
+            node: input.node,
+            remotePath: input.remotePath,
+            localPath: input.localPath,
+            include: input.include,
+            exclude: input.exclude,
+            planDigest: input.planDigest,
+            signal,
+            progress: (progress: ReturnProgress) => {
+              tracked?.store.updateReturn(tracked.scope, transferId, progress);
+              deps.onProgressChange?.();
+              if (onUpdate) {
+                const files =
+                  progress.filesTotal === 0 ? "preparing" : `${progress.filesDone}/${progress.filesTotal} files`;
+                const text = `Node workspace return ${progress.phase}: ${files}`;
+                onUpdate({
+                  content: [{ type: "text", text }],
+                  details: { phase: progress.phase },
+                  progress: {
+                    text,
+                    visibility: "channel",
+                    privacy: "public",
+                    id: "node-workspace-return",
+                  },
+                });
+              }
+            },
+          });
+          tracked?.store.finish(tracked.scope, transferId, "completed");
+          settled = true;
+          deps.onProgressChange?.(true);
+          const additions = outcome.applied.filter((entry) => entry.kind === "add").length;
+          const modifications = outcome.applied.filter((entry) => entry.kind === "modify").length;
+          const modes = outcome.applied.filter((entry) => entry.kind === "chmod").length;
+          const removedText =
+            outcome.removedOnNode.length === 0
+              ? ""
+              : ` ${outcome.removedOnNode.length} path(s) exist only on the node and were not deleted locally.`;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Returned into ${outcome.localPath}: ${additions} added, ${modifications} modified, ${modes} mode change(s); ` +
+                  `${outcome.unchanged} unchanged, ${outcome.bytesTransferred} bytes transferred.` +
+                  removedText +
+                  ` planDigest ${outcome.planDigest}.`,
+              },
+            ],
+            details: {
+              ok: true as const,
+              nodeId: outcome.nodeId,
+              localPath: outcome.localPath,
+              treeDigest: outcome.treeDigest,
+              planDigest: outcome.planDigest,
+              applied: outcome.applied,
+              unchanged: outcome.unchanged,
+              removedOnNode: outcome.removedOnNode,
+              bytesTransferred: outcome.bytesTransferred,
+              durationMs: outcome.durationMs,
+            },
+          };
+        } catch (error) {
+          if (!settled) {
+            const state =
+              error instanceof NodeWorkspaceError && error.code === "unknown-outcome"
+                ? "unknown"
+                : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
+                  ? "cancelled"
+                  : "failed";
+            tracked?.store.finish(tracked.scope, transferId, state);
+            deps.onProgressChange?.(true);
+          }
+          return toolFailure("node_workspace_return", error, context);
         }
       },
     },

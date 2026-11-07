@@ -5,8 +5,8 @@ import { nodeWorkspaceFeatureContract } from "./feature-contract.js";
 
 type Transfer = {
   transferId: string;
-  kind: "push" | "fetch";
-  phase: "scanning" | "sending" | "publishing" | "fetching";
+  kind: "push" | "fetch" | "return";
+  phase: "scanning" | "sending" | "publishing" | "fetching" | "receiving" | "applying";
   state: "running" | "completed" | "failed" | "unknown" | "cancelled";
   filesDone: number;
   filesTotal: number;
@@ -39,6 +39,7 @@ function rowText(entry: Transfer): string {
   const bytes = `${formatBytes(entry.bytesDone)} / ${formatBytes(entry.bytesTotal)}`;
   if (entry.state === "running") {
     if (entry.kind === "fetch") return `fetching ${bytes}`;
+    if (entry.kind === "return") return `returning ${files} · ${formatBytes(entry.bytesDone)}`;
     if (entry.phase === "scanning" && entry.filesTotal === 0) return "scanning";
     if (entry.phase === "publishing") return `publishing ${files} · ${formatBytes(entry.bytesTotal)}`;
     return `${entry.phase} ${files} · ${formatBytes(entry.bytesDone)}`;
@@ -52,7 +53,8 @@ function rowText(entry: Transfer): string {
 }
 
 function rowLabel(entry: Transfer): string {
-  return entry.kind === "push" ? "Publish" : "Fetch";
+  if (entry.kind === "push") return "Publish";
+  return entry.kind === "fetch" ? "Fetch" : "Return";
 }
 
 function makeRow(document: Document, entry: Transfer): { row: HTMLElement; label: HTMLElement; bar: HTMLElement } {

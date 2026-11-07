@@ -1,7 +1,8 @@
 import type { PushProgress } from "./push.js";
+import type { ReturnProgress } from "./return.js";
 
-export type TransferKind = "push" | "fetch";
-export type TransferPhase = PushProgress["phase"] | "fetching";
+export type TransferKind = "push" | "fetch" | "return";
+export type TransferPhase = PushProgress["phase"] | ReturnProgress["phase"] | "fetching";
 export type TransferState = "running" | "completed" | "failed" | "unknown" | "cancelled";
 
 export interface TransferScope {
@@ -65,7 +66,7 @@ export class TransferProgressStore {
     entries.set(transferId, {
       transferId,
       kind,
-      phase: kind === "push" ? "scanning" : "fetching",
+      phase: kind === "fetch" ? "fetching" : "scanning",
       state: "running",
       filesDone: 0,
       filesTotal: 0,
@@ -84,6 +85,16 @@ export class TransferProgressStore {
   }
 
   updateFromPush(scope: TransferScope, transferId: string, progress: PushProgress): void {
+    this.update(scope, transferId, {
+      phase: progress.phase,
+      filesDone: progress.filesDone,
+      filesTotal: progress.filesTotal,
+      bytesDone: progress.bytesDone,
+      bytesTotal: progress.bytesTotal,
+    });
+  }
+
+  updateReturn(scope: TransferScope, transferId: string, progress: ReturnProgress): void {
     this.update(scope, transferId, {
       phase: progress.phase,
       filesDone: progress.filesDone,

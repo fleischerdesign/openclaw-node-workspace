@@ -61,6 +61,8 @@ export interface Faults {
   nodeFrame?: (frame: Uint8Array, index: number) => Uint8Array | undefined;
   /** Close the channel when the Gateway sends its Nth frame (1-based). */
   closeAfterGatewayFrames?: number;
+  /** Close the channel when the node sends its Nth frame (1-based). */
+  closeAfterNodeFrames?: number;
   /** Reject openDuplex with this error. */
   openError?: Error;
 }
@@ -122,6 +124,10 @@ export function createHarness(commands: readonly NodeHostCommand[], faults: Faul
         frames: {
           send: async (message: Uint8Array) => {
             nodeFrameCount += 1;
+            if (faults.closeAfterNodeFrames !== undefined && nodeFrameCount >= faults.closeAfterNodeFrames) {
+              nodeSide.close();
+              throw new Error("simulated node-side transport loss");
+            }
             const replaced = faults.nodeFrame?.(message, nodeFrameCount);
             await nodeSide.send(replaced ?? message);
           },

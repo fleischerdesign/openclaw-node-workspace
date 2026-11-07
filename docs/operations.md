@@ -3,7 +3,7 @@
 ## Install order
 
 1. Build and pack the plugin (`npm ci && npm run build && npm pack`).
-2. Install it on the **node host** first and restart that node. The Gateway must see the three
+2. Install it on the **node host** first and restart that node. The Gateway must see all five
    commands in the node's advertised surface.
 3. Install it on the **Gateway**, enable it, configure `gateway.*`, and add the node command
    allowlist.
@@ -20,7 +20,7 @@ The commands are dangerous and are not in any default allowlist. Add exactly:
 gateway: {
   nodes: {
     commands: {
-      allow: ["nodews.push", "nodews.fetch", "nodews.status"],
+      allow: ["nodews.push", "nodews.fetch", "nodews.status", "nodews.tree", "nodews.return"],
     },
   },
 }
@@ -31,7 +31,8 @@ A `deny` entry wins over `allow`. If a command is missing at dispatch, the error
 
 ## Verify before relying on it
 
-1. `openclaw nodes describe <node>` must list `nodews.push`, `nodews.fetch`, and `nodews.status`.
+1. `openclaw nodes describe <node>` must list `nodews.push`, `nodews.fetch`, `nodews.status`,
+   `nodews.tree`, and `nodews.return`.
 2. `node_workspace_status` for an absent path returns `exists: false` and, when the parent exists,
    `parentExists: true`.
 3. Push a small directory. Confirm the result names the node id and `cwd`, then verify one file with
@@ -41,6 +42,44 @@ A `deny` entry wins over `allow`. If a command is missing at dispatch, the error
 
 Do not chain a push and an exec into one agent step without checking the push result. The plugin
 returns the cwd precisely so the agent can choose the next action.
+
+## Publish a new generation incrementally
+
+Publishing always creates a new destination; the base is never modified.
+
+1. Publish the first generation normally.
+2. After changing the local tree, call `node_workspace_push` with the new `remotePath` and
+   `incrementalFrom` set to the previous generation's absolute `remotePath`.
+3. The tool verifies the base with `node_workspace_status` before opening the channel. A base that
+   is not owned, complete, and verified fails with `conflict`; a base that drifted fails with
+   `destination-drifted`. No new destination is created in either case.
+4. The result reports `reusedFiles`, `reusedBytes`, and `transferredBytes`. Reused files are copied
+   on the node, so only changed bytes use the channel.
+
+Deleting a file locally means omitting it from the new generation. The old generation keeps it. The
+plugin never removes a generation; retire old paths yourself after verifying the new one.
+
+## Return generated changes
+
+1. Run the generator on the node through native `exec` as usual.
+2. Call `node_workspace_changes` with the node directory and the local project directory. It is
+   read-only.
+3. Read the counts and conflicts. Resolve any conflict locally, then request a fresh preview: a
+   conflict is never forced.
+4. Call `node_workspace_return` with the returned `planDigest`. A changed node tree or local tree is
+   `plan-stale`; nothing is written.
+5. The result lists what was applied and which paths exist only on the node. Those paths are not
+   deleted locally.
+
+Returned additions never replace an existing local file. A modification is allowed only when the
+local file still matches the last published generation; otherwise it is a conflict. A mode change
+is applied without transferring bytes. All returned files are owner-only.
+
+If a return is interrupted before the node's `end` frame, the staging directory is removed and no
+local file changes; retry the same previewed plan. If the process is killed during the short local
+apply window, inspect the project and request a fresh preview; a stale `.nodews-return-*` directory
+may remain and can be removed after confirming no return is running. The plugin does not delete it
+automatically.
 
 ## Reconcile an unknown outcome
 

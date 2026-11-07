@@ -1,15 +1,21 @@
 # Node Workspace
 
 An OpenClaw plugin that publishes **one explicitly selected directory** from a Gateway to a paired
-node, and fetches **one explicitly selected artifact** back. It uses the public OpenClaw plugin SDK
-and the existing node channel: no SSH, no rsync, no remote shell, and no second transport to secure.
+node, incrementally reuses unchanged files from an earlier publication, and returns **changed or
+generated project files** after a preview. It uses the public OpenClaw plugin SDK and the existing
+node channel: no SSH, no rsync, no remote shell, and no second transport to secure.
 
-The plugin is deliberately not a sync engine. A push is a verified, no-clobber one-way copy. The
+The plugin is not a watcher or a mirror. A publish is a verified, no-clobber generation: the
 destination name is claimed with `mkdir(2)` before any file is written, so an existing file or even
-an empty directory can never be replaced. The destination becomes visible while files are still
-arriving; `node_workspace_status` reports `complete: false` until the marker is finalized.
+an empty directory can never be replaced. With `incrementalFrom`, only changed bytes cross the
+channel; unchanged files are copied on the node from the previous generation, which is never
+modified. The destination becomes visible while files are still arriving;
+`node_workspace_status` reports `complete: false` until the marker is finalized.
 
-Changes made after it are not propagated, and nothing on the node is ever deleted implicitly.
+A return is explicit and previewed. `node_workspace_changes` compares the node tree with the local
+project and returns a plan digest. `node_workspace_return` applies exactly that plan, rejects a
+changed plan, refuses local conflicts, stages and verifies every byte before writing, and never
+deletes a local file because it disappeared on the node.
 
 ## What it does
 
@@ -18,13 +24,17 @@ Changes made after it are not propagated, and nothing on the node is ever delete
 | `node_workspace_push` | Scans a Gateway directory, sends it over a framed duplex node command, verifies every file by SHA-256, and claims a new destination with `mkdir(2)` before writing. Returns the canonical node id and the remote `cwd`. |
 | `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
 | `node_workspace_status` | Read-only check of a node destination: present or absent, whether this plugin published it, and whether the bytes still match the published manifest. |
+| `node_workspace_changes` | Read-only preview of a node directory against a local project: additions, safe modifications, mode changes, unchanged files, conflicts, and paths only on the node. Returns a `planDigest`. |
+| `node_workspace_return` | Applies one previewed plan. Requires the `planDigest`; a stale plan or any conflict aborts before writing. Streams into a private staging directory, verifies digests, then applies with exclusive creates, re-checked atomic replaces, rollback, and owner-only modes. Files removed on the node are reported, never deleted. |
 
 After a push the agent runs commands itself through the native `exec` tool with `host=node`. The
 plugin does not proxy execution.
 
 ## What it does not do
 
-- It does not synchronize, watch, mirror, or delete. There is no reverse workspace push.
+- It does not watch, mirror, or delete. An incremental push publishes a new generation; an existing
+  generation is never updated in place. A return never deletes a local file and never overwrites a
+  local file that differs from the last published generation.
 - It does not follow symlinks while scanning or resolving artifacts; node-side parent re-checks are
   best-effort against a concurrent same-user process, as described in Security. It does not preserve
   ownership, ACLs, xattrs, hard links, or timestamps, and it does not run on Windows nodes.
@@ -61,8 +71,8 @@ openclaw plugins enable node-workspace
 ```
 
 `--accept-capabilities` is required because the plugin registers agent tools and node commands. Read
-the plugin source before consenting; the node commands are `nodews.push`, `nodews.fetch`, and
-`nodews.status`.
+the plugin source before consenting; the node commands are `nodews.push`, `nodews.fetch`,
+`nodews.status`, `nodews.tree`, and `nodews.return`.
 
 Restart the node host after installing or updating:
 
@@ -87,6 +97,8 @@ node ignores `gateway.*`, so the same block can be copied to both.
             localRoots: ["/srv/projects"],
             // An artifact may only be written inside these directories. Empty denies every fetch.
             artifactRoots: ["/srv/incoming"],
+            // A returned project tree may only be written inside these directories. Empty denies every return.
+            returnRoots: ["/srv/projects"],
             // minimatch patterns relative to the selected workspace root.
             exclude: [".git", "node_modules"],
             // "reject" fails on a symlink; "skip" omits it. Never follows links.
@@ -103,6 +115,8 @@ node ignores `gateway.*`, so the same block can be copied to both.
             pushRoots: ["/home/agent/work"],
             // An artifact may only be read inside these real directories.
             artifactRoots: ["/home/agent/work"],
+            // A project tree may only be returned from these real directories.
+            returnRoots: ["/home/agent/work"],
             maxFiles: 2000,
             maxFileBytes: 33554432,
             maxTotalBytes: 268435456,
@@ -116,7 +130,7 @@ node ignores `gateway.*`, so the same block can be copied to both.
     nodes: {
       commands: {
         // Node commands are dangerous and are not allowlisted by default.
-        allow: ["nodews.push", "nodews.fetch", "nodews.status"],
+        allow: ["nodews.push", "nodews.fetch", "nodews.status", "nodews.tree", "nodews.return"],
       },
     },
   },
@@ -127,7 +141,7 @@ Set values with the CLI if you prefer:
 
 ```bash
 openclaw config set plugins.entries.node-workspace.config.node.pushRoots '["/home/agent/work"]'
-openclaw config set gateway.nodes.commands.allow '["nodews.push","nodews.fetch","nodews.status"]'
+openclaw config set gateway.nodes.commands.allow '["nodews.push","nodews.fetch","nodews.status","nodews.tree","nodews.return"]'
 ```
 
 Both sides must agree on the command names, and the node must advertise them. A command denied by
@@ -136,8 +150,8 @@ Both sides must agree on the command names, and the node must advertise them. A 
 ## Progress accessory
 
 The plugin can place a native accessory in the Control UI session header. It shows the measured
-scanning, sending and publishing counters for the current session, with a determinate bar, and
-turns into a short completion, unknown-outcome or failure state. It is session-scoped: the query
+scanning, sending, publishing, receiving and applying counters for the current session, with a
+determinate bar, and turns into a short completion, unknown-outcome or failure state. It is session-scoped: the query
 uses the session key and agent id supplied by the host, and the broadcast carries no counters,
 paths or node names. It does not use the shared progress card.
 
@@ -169,6 +183,20 @@ node_workspace_push(
 )
 ```
 
+Publishing a later generation reuses every unchanged file on the node:
+
+```text
+node_workspace_push(
+  node: "hom-wrk-01",
+  localPath: "/srv/projects/report",
+  remotePath: "/home/agent/work/report-gen2",
+  incrementalFrom: "/home/agent/work/report-gen1"
+)
+```
+
+Only changed bytes use the channel. The result reports `reusedFiles`, `reusedBytes`, and
+`transferredBytes`; the base directory is never modified.
+
 The result names the node id and `cwd`, for example:
 
 > published: 42 files (1.83 MiB) at /home/agent/work/report on node hom-wrk-01. sha256 tree digest
@@ -195,6 +223,27 @@ node_workspace_artifact(
 
 The destination must not exist. The bytes are verified before they are published under that name.
 
+Returning files a command generated on the node:
+
+```text
+node_workspace_changes(
+  node: "hom-wrk-01",
+  remotePath: "/home/agent/work/report-gen2",
+  localPath: "/srv/projects/report"
+)
+# then, with the returned planDigest:
+node_workspace_return(
+  node: "hom-wrk-01",
+  remotePath: "/home/agent/work/report-gen2",
+  localPath: "/srv/projects/report",
+  planDigest: "<64 hex characters>"
+)
+```
+
+The preview writes nothing. Apply refuses a changed node tree, a changed local tree, or any local
+conflict. Additions are exclusive, modifications only replace a file that still matches the last
+published generation, and paths that exist only on the node are reported rather than deleted.
+
 ## Failure semantics
 
 A failed tool returns a structured result instead of throwing: `details.ok` is `false`, with
@@ -215,7 +264,14 @@ the Gateway `tools.invoke` boundary, which would otherwise flatten a thrown erro
 | `integrity` | A digest or byte count disagreed. Treat the copy as invalid. |
 | `transport`, `timeout`, `canceled` | The channel failed **before** the node accepted the push; no effect. |
 | `unknown-outcome` | The channel failed **after** the node claimed the destination. The plugin cannot prove whether publication completed. |
-| `conflict` | A node name matches more than one paired node; use a node id. |
+| `conflict` | A node name is ambiguous, or an incremental base is not a complete, verified plugin publication. |
+| `plan-stale` | The previewed node tree or local project changed; request a new preview. Nothing was written. |
+| `local-conflict` | A returned change would overwrite a locally modified file or a non-regular path. Nothing was written. |
+
+A failed return before the node's `end` frame leaves no local change: every byte is staged and
+verified first. A failure during the short local apply rolls back the files and directories that
+call created; if rollback itself fails, the error names the paths. Request a fresh preview rather
+than reusing an old `planDigest`.
 
 A failed push may leave an incomplete destination: `mkdir(2)` has already claimed the name. Call
 `node_workspace_status`; it reports `complete: false` and `verified: false`. Remove that directory

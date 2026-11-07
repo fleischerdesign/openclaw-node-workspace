@@ -22,7 +22,7 @@ than buffered without bound.
 
 | Message | Direction | Fields |
 | --- | --- | --- |
-| `hello` | G→N | `protocol: 2`, `pushId`, `remotePath`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]` |
+| `hello` | G→N | `protocol: 3`, `pushId`, `remotePath`, `totalBytes`, `treeDigest`, `manifest[]`, `directories[]`, optional `base`, optional `reuse[]` |
 | `accepted` | N→G | `pushId` |
 | `rejected` | N→G | `code`, `message` |
 | `progress` | N→G | `phase`, `filesDone`, `bytesDone` |
@@ -38,6 +38,12 @@ Manifest entries are `{ path, size, sha256, executable }`, where `path` is relat
 is lowercase hex, and `executable` records whether any owner execute bit was set. Directories are
 relative POSIX paths and include empty directories.
 
+`base` is `{ remotePath, digest }` and `reuse` is a list of manifest file paths. Both are absent
+from a full publish. When present, every reuse path must be a manifest file, unique, and present in
+the base publication with identical size, SHA-256, and executable bit. The base must be a different,
+complete, plugin-owned directory. The node copies those files locally after claiming the destination
+and verifies each copy; only the remaining manifest entries are sent as file frames.
+
 Before `accepted`, the node claims the destination with `mkdir(2)`, writes an `incomplete` marker,
 and only then accepts. An existing file, symlink, or directory (including an empty directory)
 fails the claim with `EEXIST`; the node never renames over a destination. Files are sent in manifest
@@ -49,7 +55,7 @@ while files arrive; the marker state distinguishes incomplete from complete.
 
 Before accepting, the node independently checks:
 
-- `protocol` is exactly `2`; `pushId` is 16–64 lowercase hex; `treeDigest` is 64 lowercase hex;
+- `protocol` is exactly `3`; `pushId` is 16–64 lowercase hex; `treeDigest` is 64 lowercase hex;
 - entry count and byte totals against its own limits;
 - every path against the traversal, empty-segment, absolute, backslash, length, and reserved-marker
   rules;
@@ -58,7 +64,10 @@ Before accepting, the node independently checks:
 - `remotePath` is normalized and absolute, its parent exists, is a real directory, and resolves
   inside a configured `node.pushRoots` entry;
 - the destination is absent (the node will claim it), or it already has a complete marker for the same push id and digest
-  and every byte re-hashes to the manifest. Different content is never replaced.
+  and every byte re-hashes to the manifest. Different content is never replaced;
+- for an incremental publish, the base is a different real directory inside `node.pushRoots`, has a
+  complete marker whose digest equals `base.digest`, and every reuse entry matches the base
+  manifest. Every reused file is still re-hashed after the local copy.
 
 Nothing is written before these checks pass.
 
@@ -91,6 +100,43 @@ The request is ordinary command JSON, since it is small:
 The hash is computed while streaming and carried in `done`. The Gateway writes to a temporary file,
 requires the announced size, and compares the digest. The destination appears only after both match.
 
+## Tree: node directory manifest
+
+`nodews.tree` is a unary command. Parameters `{ remotePath }`. The directory must exist, be a real
+directory inside `node.returnRoots`, and contain no symlink or special file. The response is JSON:
+
+```
+{ ok: true, remotePath, directory, files[], directories[], totalBytes, treeDigest,
+  owned, complete, verified, drift, marker }
+```
+
+`files` uses the manifest entry shape. `marker` is the plugin marker or `null`; `verified` is true
+only when the live scan matches the marker manifest byte for byte. A changed generated tree is
+normally `verified: false` while its marker still supplies the base manifest for conflict decisions.
+This command is read-only and bounded by the node limits.
+
+## Return: node → Gateway
+
+`nodews.return` is a duplex command. The Gateway sends one control frame:
+
+| Message | Direction | Fields |
+| --- | --- | --- |
+| `hello` | G→N | `protocol: 3`, `remotePath`, `paths[]`, `treeDigest`, `planDigest` |
+| `accepted` | N→G | `treeDigest` |
+| `file` | N→G | `path`, `size`, `sha256`, `executable` |
+| *data frames* | N→G | exactly the announced bytes |
+| `end` | N→G | `treeDigest`, `files`, `bytes` |
+| `rejected` | N→G | `code`, `message`, before acceptance |
+| `return-error` | N→G | `code`, `message`, after acceptance |
+
+`paths` must be unique, sorted in byte order, and present in the freshly scanned tree. The node
+re-scans before accepting: a `treeDigest` that differs from the preview fails with `plan-stale`.
+Each file is hashed while streaming; a file that changes during the read fails the transfer. The
+node never writes, renames, or deletes anything.
+
+The Gateway stages every file in a private directory, verifies size and SHA-256, requires `end`, and
+only then applies the plan locally. A disconnect before `end` therefore changes no local file.
+
 ## Status
 
 `nodews.status` is a unary command. Parameters: `{ remotePath }`. Response: a JSON string with
@@ -119,6 +165,6 @@ up when it is empty or contains only the incomplete marker. A timeout after `acc
 
 ## Compatibility
 
-Protocol version `2` is the only version. Both sides must run the same plugin major version; the
+Protocol version `3` is the only version. Both sides must run the same plugin major version; the
 node rejects any other `protocol` value rather than guessing. OpenClaw plugin APIs are experimental,
 so pin the OpenClaw version and test both hosts on upgrade.
