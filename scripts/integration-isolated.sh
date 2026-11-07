@@ -309,7 +309,8 @@ function scan(root, base = root, entries = new Map()) {
   for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
     const absolute = path.join(base, entry.name);
     const relative = path.relative(root, absolute);
-    if (relative === ".openclaw-node-workspace.json") continue;
+    if (relative === ".openclaw-node-workspace.json" || relative === ".nodews-return-state.json") continue;
+    if (entry.name.startsWith(".nodews-return-")) continue;
     if (entry.isSymbolicLink()) throw new Error(`published tree contains a symlink: ${relative}`);
     if (entry.isDirectory()) {
       entries.set(`${relative}/`, "dir");

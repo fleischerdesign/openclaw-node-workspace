@@ -338,3 +338,73 @@ test("a local mode change is a conflict instead of being silently undone", async
   assert.equal(preview.plan.conflicts[0]?.reason, "local-modified");
   assert.equal((await fs.stat(path.join(sourceRoot, "run.sh"))).mode & 0o777, 0o755);
 });
+
+test("a mode-only change preserves group and other bits", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "run.sh": "#!/bin/sh\n" });
+  await fs.chmod(path.join(sourceRoot, "run.sh"), 0o644);
+  await fs.chmod(path.join(remotePath, "run.sh"), 0o755);
+  const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(preview.plan.counts.modeChanges, 1);
+  await applyReturn(harness.transport, config.gateway, {
+    ...previewInput(sourceRoot, remotePath),
+    planDigest: preview.plan.planDigest,
+    progress: undefined,
+  });
+  assert.equal((await fs.stat(path.join(sourceRoot, "run.sh"))).mode & 0o777, 0o744);
+});
+
+test("an unverified marker is not used as a conflict base", async () => {
+  const { sourceRoot, remotePath, config, harness } = await published({ "a.txt": "alpha" });
+  await fs.rm(path.join(sourceRoot, ".nodews-return-state.json"));
+  await fs.writeFile(path.join(remotePath, "a.txt"), "node changed");
+  const preview = await previewReturn(harness.transport, config.gateway, previewInput(sourceRoot, remotePath));
+  assert.equal(preview.plan.counts.conflicts, 1);
+  assert.equal(preview.plan.conflicts[0]?.reason, "no-base");
+  assert.equal(await fs.readFile(path.join(sourceRoot, "a.txt"), "utf8"), "alpha");
+});
+
+test("a plan above the report cap is refused before any write", async () => {
+  const sourceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-ret-cap-src-"));
+  const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-ret-cap-dst-"));
+  const artifactRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-ret-cap-art-"));
+  const remote = path.join(destinationRoot, "app");
+  await fs.mkdir(remote);
+  for (let index = 0; index < 201; index += 1) {
+    await fs.writeFile(path.join(remote, `f${String(index).padStart(3, "0")}.txt`), "x");
+  }
+  const raw = {
+    gateway: {
+      localRoots: [sourceRoot],
+      artifactRoots: [artifactRoot],
+      returnRoots: [sourceRoot],
+      timeoutMs: 20_000,
+      maxFiles: 300,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+    node: {
+      pushRoots: [destinationRoot],
+      artifactRoots: [artifactRoot],
+      returnRoots: [destinationRoot],
+      maxFiles: 300,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024,
+    },
+  };
+  const { createNodeCommands: makeCommands } = await import("../src/node/commands.js");
+  const commands = makeCommands(raw);
+  const limited = createHarness(commands.commands);
+  const config = resolvePluginConfig(raw);
+  const preview = await previewReturn(limited.transport, config.gateway, previewInput(sourceRoot, remote));
+  assert.equal(preview.plan.operations.length, 201);
+  await assert.rejects(
+    () =>
+      applyReturn(limited.transport, config.gateway, {
+        ...previewInput(sourceRoot, remote),
+        planDigest: preview.plan.planDigest,
+        progress: undefined,
+      }),
+    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "limit-exceeded",
+  );
+  assert.deepEqual(await fs.readdir(sourceRoot), []);
+});

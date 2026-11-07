@@ -70,11 +70,14 @@ plugin never removes a generation; retire old paths yourself after verifying the
    same patterns before its limits, so an excluded subtree cannot fail the preview.
 4. Call `node_workspace_return` with the returned `planDigest`. A changed node tree or local tree is
    `plan-stale`; nothing is written.
-5. The result lists what was applied and which paths were removed on the node. Those paths are not
+5. A preview reports at most 200 file operations. A larger plan is refused before any write; narrow
+   `include`/`exclude` or split the return. The result lists what was applied and which paths were
+   removed on the node. Those paths are not
    deleted locally.
 6. The Gateway records the reconciled node content in `.nodews-return-state.json` (0600) inside the
-   project. The next preview uses it as the conflict base, so generate-return-generate works without
-   re-publishing. If the file is missing or unreadable, the publication marker is used; a local file
+   project, keyed by node id and remote path. The next preview uses it as the conflict base, so
+   generate-return-generate works without re-publishing and two nodes with the same path keep
+   separate bases. If the file is missing or unreadable, the publication marker is used; a local file
    that then differs from that older base is reported as a conflict rather than overwritten.
 
 Returned additions never replace an existing local file. A modification is allowed only when the

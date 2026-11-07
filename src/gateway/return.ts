@@ -8,8 +8,8 @@ import type { GatewayConfig } from "../config.js";
 import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { scanWorkspace } from "../manifest.js";
-import { RETURN_STATE_FILE, assertSafeRelativePath, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
-import { COMMAND_RETURN, PROTOCOL_VERSION, parseManifestEntry } from "../protocol.js";
+import { RETURN_STATE_FILE, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { COMMAND_RETURN, PROTOCOL_VERSION } from "../protocol.js";
 import { fsyncDirectory } from "../node/fs-atomic.js";
 import {
   assertControlFrame,
@@ -20,6 +20,10 @@ import {
 } from "../transport.js";
 import { buildReturnPlan, assertPlanApplicable, type ReturnPlan, type ReturnOperation } from "../return-plan.js";
 import { readNodeTree, type NodeTreeOutcome } from "./tree.js";
+import { readReturnState, writeReturnState } from "./return-state.js";
+
+/** The report shows at most this many operations; a larger plan is refused. */
+export const MAX_RETURN_OPERATIONS = 200;
 
 export interface ReturnPreviewInput {
   readonly node: string;
@@ -184,11 +188,14 @@ export async function previewReturn(
     signal: input.signal,
     deadline,
   });
+  // A node marker is a claim, not proof. It becomes a conflict base only when
+  // the live tree still matches it; otherwise only the local return baseline
+  // can authorize a content replacement.
   const markerManifest =
-    tree.marker !== null && tree.marker.state === "complete" && tree.marker.manifest !== undefined
+    tree.verified && tree.marker !== null && tree.marker.manifest !== undefined
       ? tree.marker.manifest
       : undefined;
-  const stateManifest = await readReturnState(local.directory, remotePath);
+  const stateManifest = await readReturnState(local.directory, nodeId, remotePath);
   const baseManifest = mergeBase(markerManifest, stateManifest);
   const plan = buildReturnPlan({
     nodeId,
@@ -208,103 +215,6 @@ export async function previewReturn(
 }
 
 const RETURN_STAGING_PATTERN = "**/.nodews-return-*";
-const RETURN_STATE_MAX_BYTES = 4 * 1024 * 1024;
-const RETURN_STATE_MAX_BASES = 32;
-
-interface ReturnBaseState {
-  readonly treeDigest: string;
-  readonly files: readonly ManifestEntry[];
-  readonly updatedAt: string;
-}
-
-interface ReturnStateFile {
-  readonly version: 1;
-  readonly bases: Record<string, ReturnBaseState>;
-}
-
-/**
- * Read the local record of the last returned node content for this remote path.
- *
- * This is a conflict baseline, not authority: an unreadable or malformed file
- * is ignored and the publication marker is used instead.
- */
-async function readReturnState(root: string, remotePath: string): Promise<readonly ManifestEntry[] | undefined> {
-  const statePath = path.join(root, RETURN_STATE_FILE);
-  try {
-    const stat = await fs.lstat(statePath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > RETURN_STATE_MAX_BYTES) return undefined;
-    const raw = JSON.parse(await fs.readFile(statePath, "utf8")) as Partial<ReturnStateFile>;
-    if (raw.version !== 1 || typeof raw.bases !== "object" || raw.bases === null) return undefined;
-    const entry = raw.bases[remotePath];
-    if (!entry || !Array.isArray(entry.files)) return undefined;
-    return entry.files.map((candidate) => {
-      const parsed = parseManifestEntry(candidate);
-      assertSafeRelativePath(parsed.path, "return state path");
-      return parsed;
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-/** Record the node content this return reconciled, for the next preview. */
-async function writeReturnState(
-  root: string,
-  remotePath: string,
-  treeDigest: string,
-  files: readonly ManifestEntry[],
-  keepPaths: ReadonlySet<string>,
-): Promise<boolean> {
-  const statePath = path.join(root, RETURN_STATE_FILE);
-  try {
-    const existing = await fs.lstat(statePath).catch((error: unknown) => {
-      if (isErrno(error, "ENOENT")) return undefined;
-      throw error;
-    });
-    if (existing !== undefined && (existing.isSymbolicLink() || !existing.isFile())) return false;
-    let state: ReturnStateFile = { version: 1, bases: {} };
-    if (existing !== undefined) {
-      try {
-        const parsed = JSON.parse(await fs.readFile(statePath, "utf8")) as ReturnStateFile;
-        if (parsed.version === 1 && typeof parsed.bases === "object" && parsed.bases !== null) state = parsed;
-      } catch {
-        // A malformed state file is replaced by a fresh baseline.
-      }
-    }
-    const previous = (state.bases[remotePath]?.files ?? []).filter((entry) => keepPaths.has(entry.path));
-    const merged = new Map(previous.map((entry) => [entry.path, entry]));
-    for (const entry of files) merged.set(entry.path, entry);
-    const bases: Record<string, ReturnBaseState> = {
-      ...state.bases,
-      [remotePath]: {
-        treeDigest,
-        files: [...merged.values()].sort((left, right) =>
-          Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)),
-        ),
-        updatedAt: new Date().toISOString(),
-      },
-    };
-    const ordered = Object.entries(bases)
-      .sort((left, right) => right[1].updatedAt.localeCompare(left[1].updatedAt))
-      .slice(0, RETURN_STATE_MAX_BASES);
-    const body = JSON.stringify({ version: 1, bases: Object.fromEntries(ordered) }, null, 2) + "\n";
-    if (Buffer.byteLength(body, "utf8") > RETURN_STATE_MAX_BYTES) return false;
-    const temp = path.join(root, `.nodews-return-state-${randomUUID()}.tmp`);
-    const handle = await fs.open(temp, "wx", 0o600);
-    try {
-      await handle.writeFile(body, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await fs.rename(temp, statePath);
-    await fsyncDirectory(root).catch(() => undefined);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function mergeBase(
   marker: readonly ManifestEntry[] | undefined,
   state: readonly ManifestEntry[] | undefined,
@@ -483,8 +393,9 @@ async function applyStaged(
         if (stat.isSymbolicLink() || !stat.isFile()) {
           throw new NodeWorkspaceError("local-conflict", `${operation.path} is no longer a regular file`);
         }
-        const previousMode = stat.mode & 0o777;
-        await fs.chmod(target, operation.executable ? 0o700 : 0o600);
+        const previousMode = stat.mode & 0o7777;
+        const nextMode = operation.executable ? previousMode | 0o100 : previousMode & ~0o100;
+        await fs.chmod(target, nextMode);
         applied.push({ kind: "chmod", path: operation.path, mode: previousMode });
         continue;
       }
@@ -562,6 +473,13 @@ export async function applyReturn(
       { planDigest: preview.plan.planDigest },
     );
   }
+  if (preview.plan.operations.length > MAX_RETURN_OPERATIONS) {
+    throw new NodeWorkspaceError(
+      "limit-exceeded",
+      `the return plan has ${preview.plan.operations.length} operations, above the ${MAX_RETURN_OPERATIONS}-path report cap. ` +
+        "Narrow include/exclude or split the return; nothing was written.",
+    );
+  }
   assertPlanApplicable(preview.plan);
   const plan = preview.plan;
   const root = plan.localPath;
@@ -575,7 +493,7 @@ export async function applyReturn(
       ...preview.tree.files.map((entry) => entry.path),
       ...(preview.tree.marker?.manifest?.map((entry) => entry.path) ?? []),
     ]);
-    return await writeReturnState(root, plan.remotePath, plan.treeDigest, files, keepPaths);
+    return await writeReturnState(root, plan.nodeId, plan.remotePath, plan.treeDigest, files, keepPaths);
   };
 
   if (plan.operations.length === 0) {

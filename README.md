@@ -25,7 +25,7 @@ deletes a local file because it disappeared on the node.
 | `node_workspace_artifact` | Fetches one file from the node, verifies its SHA-256, and creates the Gateway destination exclusively. An existing file is never overwritten. |
 | `node_workspace_status` | Read-only check of a node destination: present or absent, whether this plugin published it, and whether the bytes still match the published manifest. |
 | `node_workspace_changes` | Read-only preview of a node directory against a local project: additions, safe modifications, mode changes, unchanged files, conflicts, and paths removed on the node. Returns a `planDigest`. |
-| `node_workspace_return` | Applies one previewed plan. Requires the `planDigest`; a stale plan or any conflict aborts before writing. Streams into a private staging directory, verifies digests, then applies with exclusive creates, re-checked atomic replaces, rollback, and owner-only modes. Files removed on the node are reported, never deleted. |
+| `node_workspace_return` | Applies one previewed plan. Requires the `planDigest`; a stale plan or any conflict aborts before writing. Streams into a private staging directory, verifies digests, then applies with exclusive creates, re-checked atomic replaces, rollback, and owner-only modes for content. A mode-only change toggles the owner execute bit and preserves the rest of the file mode. Files removed on the node are reported, never deleted. |
 
 After a push the agent runs commands itself through the native `exec` tool with `host=node`. The
 plugin does not proxy execution.
@@ -243,8 +243,9 @@ node_workspace_return(
 The preview writes nothing. Apply refuses a changed node tree, a changed local tree, or any local
 conflict. Additions are exclusive, modifications only replace a file that still matches the last
 return (or publication), and paths that were removed on the node are reported rather than deleted.
-A successful return records a 0600 baseline in `.nodews-return-state.json`, so the next
-generate-return cycle compares against what was actually returned. Names beginning
+A successful push or return records a 0600 baseline in `.nodews-return-state.json`, keyed by node
+and remote path, so the next generate-return cycle compares against what was actually reconciled.
+Two nodes that use the same absolute path keep separate baselines. Names beginning
 `.nodews-return-` are reserved inside a return project and are excluded from scans.
 
 ## Failure semantics

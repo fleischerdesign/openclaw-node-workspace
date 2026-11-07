@@ -7,12 +7,14 @@
   creates only below `node.pushRoots`; a node artifact reads only inside `node.artifactRoots`; a node
   tree or return reads only inside `node.returnRoots`. Roots are resolved with `realpath`; an empty
   list denies the operation.
-- **The return base is local state, not a node claim.** The last successful return writes
-  `.nodews-return-state.json` (0600) in the project with the node content it reconciled. A missing or
-  malformed file falls back to the publication marker; neither grants an overwrite by itself.
+- **The return base is local state keyed by node and path.** A successful push or return writes
+  `.nodews-return-state.json` (0600) with the node content it reconciled, keyed by `nodeId` and
+  `remotePath`. Two nodes using the same absolute path never share a base. A node marker is used as
+  a fallback only when the live tree still verifies against it; an unverified marker never
+  authorizes a replacement. A missing, malformed or foreign state file is ignored, not replaced.
 - **A return is a previewed, conflict-checked plan.** `node_workspace_return` requires the
   `planDigest` from `node_workspace_changes` and re-derives the plan. A changed node tree or local
-  tree is `plan-stale`; any local modification since the published base is `local-conflict`. Nothing
+  tree is `plan-stale`; any local modification since the reconciled base is `local-conflict`. Nothing
   is written in either case. Additions are created exclusively; modifications re-check the local
   digest immediately before an atomic replace; a failure rolls back files and directories this call
   created. No local file is ever deleted.
@@ -60,6 +62,17 @@
 - **No shell.** The plugin never spawns a process, never runs `rsync`, and never opens an SSH
   connection. Execution is left to the native `exec` tool and its own approval path.
 
+## Trust boundary
+
+A paired node is a **trusted content source**, not a passive sink. A return writes files the node
+authored under `gateway.returnRoots`, including executable files. Anything that later builds,
+imports, or runs that project executes node-provided content; the plugin does not inspect source
+code, build scripts, or binaries. Approve a node and configure its roots only when you accept that.
+
+`nodews.tree` is a unary command: any agent allowed to invoke it can enumerate the manifest of a
+directory under `node.returnRoots` (paths, sizes, digests, modes) without a duplex session. The node
+command allowlist and the configured roots are the authority boundary.
+
 ## What is not claimed
 
 - **This is not a sandbox.** A Gateway operator who can configure `localRoots` can publish any
@@ -95,8 +108,9 @@
 - **No deletion at all.** The plugin never removes a published directory or a file inside it, and a
   return never deletes a local file or a node file. Replacing content means publishing a new
   generation out of band.
-- **A return's mode changes are owner-only.** A returned file is published as 0600, or 0700 when the
-  node marked it executable. Group and other bits never cross.
+- **A return's modes are bounded.** Content additions and replacements are published owner-only
+  (0600, or 0700 when executable). A content-preserving mode change only toggles the owner execute
+  bit and preserves the file's other permission bits.
 - **Residual same-user race on return.** The local apply re-checks each parent, digest and
   destination immediately before writing, but Node has no `openat`/`renameat2`-with-expected-inode
   primitive. A process running as the same local user can still replace a checked parent between the

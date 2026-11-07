@@ -111,8 +111,9 @@ A return reads a node directory and writes only the local changes an explicit pl
 3. **Build a plan.** For every selected node file: absent locally is an addition; identical is
    unchanged; a different executable bit alone is a mode change when the local mode still matches
    the base; different content is a safe modification only when the local content still matches the
-   base. The base is the local return record from the last successful return for this remote path,
-   overlaid on the publication marker, so a second generation can be returned. Everything else is a
+   base. The base is the local return record keyed by node id and remote path, written after a
+   successful push or return, so a second generation can be returned. A publication marker is used
+   only when the live tree still verifies against it. Everything else is a
    conflict. Paths that were in the base but no longer exist on the node are reported as
    `nodeRemoved` and are never deleted. The plan digest covers every operation, conflict,
    nodeRemoved entry, directory, the node tree digest, and both paths.
@@ -128,8 +129,8 @@ A return reads a node directory and writes only the local changes an explicit pl
    a staging backup, re-check its digest, then rename the staged file over it atomically. A failure
    restores backups, removes files this call created, and removes created empty directories.
 7. **Record and report.** On success the Gateway writes `.nodews-return-state.json` in the local
-   project (0600) with the node content it reconciled; the next preview uses that record as the
-   conflict base. A failed write does not undo the applied files; the result reports
+   project (0600) with the node content it reconciled, keyed by node id and remote path; the next
+   preview uses that record as the conflict base. A failed write does not undo the applied files; the result reports
    `stateRecorded: false`. The result lists applied paths, the unchanged count, and the paths
    removed on the node; empty directories are created as part of the apply. It never deletes a local file and never modifies the
    node tree.

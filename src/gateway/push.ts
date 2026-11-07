@@ -6,9 +6,10 @@ import type { GatewayConfig } from "../config.js";
 import { derivePushId } from "../digest.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
 import { scanWorkspace, type ScanResult } from "../manifest.js";
-import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { RETURN_STATE_FILE, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_PUSH, PROTOCOL_VERSION } from "../protocol.js";
 import { workspaceStatus } from "./status.js";
+import { writeReturnState } from "./return-state.js";
 import {
   assertControlFrame,
   controlType,
@@ -48,11 +49,29 @@ export interface PushOutcome {
   readonly reusedFiles: number;
   readonly reusedBytes: number;
   readonly transferredBytes: number;
+  /** True when the local return baseline was written for the new generation. */
+  readonly stateRecorded: boolean;
   readonly durationMs: number;
   readonly skipped: readonly { readonly path: string; readonly reason: "symlink" | "excluded" }[];
 }
 
 const DEFAULT_FRAME_TIMEOUT_MS = 120_000;
+
+/**
+ * A push may write a return baseline only when the local project is also a
+ * configured return target. Reading a directory grants no write authority.
+ */
+async function canRecordReturnState(root: string, config: GatewayConfig): Promise<boolean> {
+  for (const candidate of config.returnRoots) {
+    try {
+      const real = await fs.realpath(candidate);
+      if (isWithin(real, root)) return true;
+    } catch {
+      // A configured root that does not exist grants nothing.
+    }
+  }
+  return false;
+}
 
 function checkAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
@@ -124,7 +143,9 @@ export async function pushWorkspace(
   const nodeId = await resolveNodeId(transport, input.node);
   const root = await resolveLocalWorkspace(input.localPath, config);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
-  const exclude = [...config.exclude, ...(input.exclude ?? [])];
+  // The local return baseline and staging directory are plugin-owned and
+  // must never be published as project content.
+  const exclude = [...config.exclude, ...(input.exclude ?? []), RETURN_STATE_FILE, "**/.nodews-return-*"];
 
   input.progress?.({
     phase: "scanning",
@@ -188,6 +209,17 @@ export async function pushWorkspace(
   checkAborted(input.signal);
 
   const pushId = derivePushId(nodeId, remotePath, scan.treeDigest);
+  const recordState = async (): Promise<boolean> => {
+    if (!(await canRecordReturnState(root, config))) return false;
+    return await writeReturnState(
+      root,
+      nodeId,
+      remotePath,
+      scan.treeDigest,
+      scan.files,
+      new Set(scan.files.map((entry) => entry.path)),
+    );
+  };
   let session: FrameSession | undefined;
   let accepted = false;
   let resultReceived = false;
@@ -263,6 +295,7 @@ export async function pushWorkspace(
         reusedFiles: reuse.size,
         reusedBytes,
         transferredBytes: scan.totalBytes - reusedBytes,
+        stateRecorded: await recordState(),
         durationMs: Date.now() - startedAt,
         skipped: scan.skipped,
       };
@@ -378,6 +411,7 @@ export async function pushWorkspace(
           reusedFiles: reuse.size,
           reusedBytes,
           transferredBytes: scan.totalBytes - reusedBytes,
+          stateRecorded: await recordState(),
           durationMs: Date.now() - startedAt,
           skipped: scan.skipped,
         };

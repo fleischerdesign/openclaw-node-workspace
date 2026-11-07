@@ -7,7 +7,7 @@ import { NodeWorkspaceError } from "../errors.js";
 import type { NodeTransport } from "../transport.js";
 import { fetchArtifact } from "./artifact.js";
 import { pushWorkspace, type PushProgress } from "./push.js";
-import { applyReturn, previewReturn, type ReturnProgress } from "./return.js";
+import { MAX_RETURN_OPERATIONS, applyReturn, previewReturn, type ReturnProgress } from "./return.js";
 import type { TransferProgressStore, TransferScope } from "./progress-store.js";
 import { workspaceStatus, type StatusOutcome } from "./status.js";
 
@@ -223,6 +223,7 @@ const pushSuccess = Type.Object(
     reusedFiles: Type.Number(),
     reusedBytes: Type.Number(),
     transferredBytes: Type.Number(),
+    stateRecorded: Type.Boolean(),
     durationMs: Type.Number(),
     skipped: Type.Number(),
     skippedPaths: Type.Array(Type.String()),
@@ -441,7 +442,7 @@ const returnDetails = Type.Object(
   { additionalProperties: false },
 );
 
-const MAX_REPORTED_PATHS = 200;
+const MAX_REPORTED_PATHS = MAX_RETURN_OPERATIONS;
 
 export function createTools(deps: ToolDependencies): AnyAgentTool[] {
   // Deliberately absolute-path only: a relative path would silently depend on
@@ -506,7 +507,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                 text:
                   `${verb}: ${outcome.files} files (${mib} MiB) at ${outcome.cwd} on node ${outcome.nodeId}. ` +
                   `sha256 tree digest ${outcome.digest}. ` +
-                  `One-way copy; later Gateway changes are not synchronized.` +
+                  `One-way copy; later Gateway changes are not synchronized. ` +
+                  (outcome.stateRecorded ? "A local return baseline was recorded." : "No local return baseline was recorded; the first return may report conflicts.") +
                   skippedNote +
                   ` ` +
                   `Run commands there with the exec tool: host=node, node=${outcome.nodeId}, workdir=${outcome.cwd}.`,
@@ -524,6 +526,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               reusedFiles: outcome.reusedFiles,
               reusedBytes: outcome.reusedBytes,
               transferredBytes: outcome.transferredBytes,
+              stateRecorded: outcome.stateRecorded,
               durationMs: outcome.durationMs,
               skipped: outcome.skipped.length,
               skippedPaths: outcome.skipped.map((entry) => entry.path),

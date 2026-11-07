@@ -18,8 +18,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 94
-ℹ pass 94
+ℹ tests 99
+ℹ pass 99
 ℹ fail 0
 ```
 
@@ -115,6 +115,11 @@ The independent review of the incremental/return change produced these regressio
 | Exclude patterns could not rescue the node scan | `exclude patterns rescue a node scan before its limits apply` |
 | A local mode change was silently undone | `a local mode change is a conflict instead of being silently undone` |
 | A malformed node marker reached the planner | `a malformed marker manifest is ignored instead of reaching the planner`, `a marker with a non-array manifest is ignored` |
+| Two nodes on the same absolute path shared a return base | `two nodes with the same remotePath keep separate return baselines` |
+| A plan above the 200-operation report cap could still execute | `a plan above the report cap is refused before any write` |
+| An unverified marker authorized a replacement | `an unverified marker is not used as a conflict base` |
+| A foreign state file was silently replaced | `a foreign file named like the state file is left untouched` |
+| A mode-only return reset unrelated permission bits | `a mode-only change preserves group and other bits` |
 
 ## What is not proven
 
