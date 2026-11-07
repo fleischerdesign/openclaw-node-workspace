@@ -36,7 +36,8 @@
 - **No implicit directory creation.** A push destination's parent must already exist inside a
   configured root. The plugin does not create a chain that could escape the operator's intent.
 - **Traversal and name rules.** Manifest paths are relative, component-checked, length-bounded, and
-  may not use the reserved marker name. Absolute paths, `..`, empty segments, and backslashes are
+  may not use the reserved marker or return-state names. Names beginning `.nodews-return-` are
+  reserved in a return project and excluded from local scans. Absolute paths, `..`, empty segments, and backslashes are
   rejected on both sides.
 - **Independent verification.** The Gateway hashes what it sends; the node hashes what it receives
   and re-hashes the staged files before publication; the tree digest is recomputed on the node. A

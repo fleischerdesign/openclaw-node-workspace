@@ -244,7 +244,8 @@ The preview writes nothing. Apply refuses a changed node tree, a changed local t
 conflict. Additions are exclusive, modifications only replace a file that still matches the last
 return (or publication), and paths that were removed on the node are reported rather than deleted.
 A successful return records a 0600 baseline in `.nodews-return-state.json`, so the next
-generate-return cycle compares against what was actually returned.
+generate-return cycle compares against what was actually returned. Names beginning
+`.nodews-return-` are reserved inside a return project and are excluded from scans.
 
 ## Failure semantics
 
