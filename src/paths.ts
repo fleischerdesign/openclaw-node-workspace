@@ -3,6 +3,7 @@ import path from "node:path";
 import { NodeWorkspaceError } from "./errors.js";
 
 export const MARKER_FILE = ".openclaw-node-workspace.json";
+export const RETURN_STATE_FILE = ".nodews-return-state.json";
 export const MAX_PATH_BYTES = 4096;
 export const MAX_MARKER_BYTES = 4 * 1024 * 1024;
 export const MAX_COMPONENT_BYTES = 255;
@@ -65,6 +66,9 @@ export function assertSafeRelativePath(value: string, label = "path"): string {
   }
   if (segments[0] === MARKER_FILE) {
     invalid(`${label} uses the reserved plugin marker name ${MARKER_FILE}`);
+  }
+  if (segments[0]?.toLowerCase() === RETURN_STATE_FILE) {
+    invalid(`${label} uses the reserved return state name ${RETURN_STATE_FILE}`);
   }
   return value;
 }

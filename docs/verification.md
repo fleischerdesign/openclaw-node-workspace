@@ -18,8 +18,8 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 92
-ℹ pass 92
+ℹ tests 94
+ℹ pass 94
 ℹ fail 0
 ```
 
@@ -114,6 +114,7 @@ The independent review of the incremental/return change produced these regressio
 | Empty generated directories were dropped | `an empty node directory is created on return` |
 | Exclude patterns could not rescue the node scan | `exclude patterns rescue a node scan before its limits apply` |
 | A local mode change was silently undone | `a local mode change is a conflict instead of being silently undone` |
+| A malformed node marker reached the planner | `a malformed marker manifest is ignored instead of reaching the planner`, `a marker with a non-array manifest is ignored` |
 
 ## What is not proven
 

@@ -83,6 +83,14 @@
   partial tree behind an atomic rename.
 - **No Windows support.** The path rules and publication model are POSIX. A Windows node is not a
   supported target, and the command's `isAvailable` is not used to claim otherwise.
+- **The return baseline is local state, not a publication record.** It records the node content
+  the last successful return reconciled. If the node publishes a newer generation between returns
+  while the local file still matches the recorded baseline, the return fast-forwards to the newer
+  node content without a conflict: no local edit is lost, but the generation change is not surfaced
+  as a conflict. Request a preview and inspect it when generations diverge.
+- **A narrow return records only its selected paths.** A later preview with a wider `include` can
+  report `no-base` for paths that were never returned; that is a fail-closed conflict, not an
+  overwrite.
 - **No deletion at all.** The plugin never removes a published directory or a file inside it, and a
   return never deletes a local file or a node file. Replacing content means publishing a new
   generation out of band.

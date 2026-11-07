@@ -8,7 +8,7 @@ import type { GatewayConfig } from "../config.js";
 import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { scanWorkspace } from "../manifest.js";
-import { assertSafeRelativePath, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { RETURN_STATE_FILE, assertSafeRelativePath, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_RETURN, PROTOCOL_VERSION, parseManifestEntry } from "../protocol.js";
 import { fsyncDirectory } from "../node/fs-atomic.js";
 import {
@@ -208,7 +208,6 @@ export async function previewReturn(
 }
 
 const RETURN_STAGING_PATTERN = "**/.nodews-return-*";
-const RETURN_STATE_FILE = ".nodews-return-state.json";
 const RETURN_STATE_MAX_BYTES = 4 * 1024 * 1024;
 const RETURN_STATE_MAX_BASES = 32;
 
@@ -254,6 +253,7 @@ async function writeReturnState(
   remotePath: string,
   treeDigest: string,
   files: readonly ManifestEntry[],
+  keepPaths: ReadonlySet<string>,
 ): Promise<boolean> {
   const statePath = path.join(root, RETURN_STATE_FILE);
   try {
@@ -271,7 +271,7 @@ async function writeReturnState(
         // A malformed state file is replaced by a fresh baseline.
       }
     }
-    const previous = state.bases[remotePath]?.files ?? [];
+    const previous = (state.bases[remotePath]?.files ?? []).filter((entry) => keepPaths.has(entry.path));
     const merged = new Map(previous.map((entry) => [entry.path, entry]));
     for (const entry of files) merged.set(entry.path, entry);
     const bases: Record<string, ReturnBaseState> = {
@@ -464,6 +464,7 @@ async function applyStaged(
   try {
     for (const relative of plan.directories) {
       const directory = targetPath(root, relative);
+      await assertRealParent(root, relative);
       try {
         await fs.mkdir(directory, { mode: 0o700 });
         createdDirectories.push(directory);
@@ -570,7 +571,11 @@ export async function applyReturn(
   const recordState = async (): Promise<boolean> => {
     const selected = new Set<string>([...plan.unchanged, ...plan.operations.map((entry) => entry.path)]);
     const files = preview.tree.files.filter((entry) => selected.has(entry.path));
-    return await writeReturnState(root, plan.remotePath, plan.treeDigest, files);
+    const keepPaths = new Set([
+      ...preview.tree.files.map((entry) => entry.path),
+      ...(preview.tree.marker?.manifest?.map((entry) => entry.path) ?? []),
+    ]);
+    return await writeReturnState(root, plan.remotePath, plan.treeDigest, files, keepPaths);
   };
 
   if (plan.operations.length === 0) {
@@ -578,6 +583,7 @@ export async function applyReturn(
     try {
       for (const relative of plan.directories) {
         const directory = targetPath(root, relative);
+        await assertRealParent(root, relative);
         try {
           await fs.mkdir(directory, { mode: 0o700 });
           createdDirectories.push(directory);

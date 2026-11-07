@@ -4,6 +4,7 @@ import test from "node:test";
 import { resolvePluginConfig } from "../src/config.js";
 import { NodeWorkspaceError } from "../src/errors.js";
 import { readNodeTree } from "../src/gateway/tree.js";
+import { treeDigest } from "../src/digest.js";
 import type { NodeTransport } from "../src/transport.js";
 
 const config = resolvePluginConfig({}).gateway;
@@ -22,6 +23,8 @@ function transportWith(payload: Record<string, unknown>): NodeTransport {
   };
 }
 
+const emptyDigest = treeDigest({ version: 1, files: [], directories: [] });
+
 const base = {
   ok: true,
   remotePath: "/srv/work",
@@ -29,7 +32,7 @@ const base = {
   files: [],
   directories: [],
   totalBytes: 0,
-  treeDigest: "0".repeat(64),
+  treeDigest: emptyDigest,
   owned: false,
   complete: false,
   verified: false,
@@ -68,4 +71,42 @@ test("a node tree file without its declared parent directory is rejected", async
     () => readNodeTree(transportWith(payload), config, { node: "node-1", remotePath: "/srv/work" }),
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "protocol",
   );
+});
+
+test("a malformed marker manifest is ignored instead of reaching the planner", async () => {
+  const payload = {
+    ...base,
+    marker: {
+      plugin: "node-workspace",
+      protocol: 1,
+      pushId: "a".repeat(32),
+      digest: emptyDigest,
+      files: 1,
+      bytes: 1,
+      createdAt: "2026-11-07T00:00:00.000Z",
+      state: "complete",
+      manifest: [{ path: "../escape.txt", size: 1, sha256: "a".repeat(64), executable: false }],
+    },
+  };
+  const outcome = await readNodeTree(transportWith(payload), config, { node: "node-1", remotePath: "/srv/work" });
+  assert.equal(outcome.marker, null);
+});
+
+test("a marker with a non-array manifest is ignored", async () => {
+  const payload = {
+    ...base,
+    marker: {
+      plugin: "node-workspace",
+      protocol: 1,
+      pushId: "a".repeat(32),
+      digest: "0".repeat(64),
+      files: 1,
+      bytes: 1,
+      createdAt: "2026-11-07T00:00:00.000Z",
+      state: "complete",
+      manifest: "not an array",
+    },
+  };
+  const outcome = await readNodeTree(transportWith(payload), config, { node: "node-1", remotePath: "/srv/work" });
+  assert.equal(outcome.marker, null);
 });

@@ -130,8 +130,8 @@ A return reads a node directory and writes only the local changes an explicit pl
 7. **Record and report.** On success the Gateway writes `.nodews-return-state.json` in the local
    project (0600) with the node content it reconciled; the next preview uses that record as the
    conflict base. A failed write does not undo the applied files; the result reports
-   `stateRecorded: false`. The result lists applied paths, the unchanged count, missing directories
-   created, and the paths removed on the node. It never deletes a local file and never modifies the
+   `stateRecorded: false`. The result lists applied paths, the unchanged count, and the paths
+   removed on the node; empty directories are created as part of the apply. It never deletes a local file and never modifies the
    node tree.
 
 ## Artifact lifecycle

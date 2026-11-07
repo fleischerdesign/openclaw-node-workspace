@@ -21,6 +21,65 @@ export interface NodeTreeOutcome {
   readonly marker: Marker | null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A malformed or foreign marker is ignored; it is never trusted as a base. */
+function parseMarker(value: unknown): Marker | null {
+  if (!isRecord(value)) return null;
+  if (value.plugin !== "node-workspace" || value.protocol !== 1) return null;
+  if (
+    typeof value.pushId !== "string" ||
+    typeof value.digest !== "string" ||
+    typeof value.files !== "number" ||
+    typeof value.bytes !== "number" ||
+    typeof value.createdAt !== "string"
+  ) {
+    return null;
+  }
+  const state = value.state;
+  if (state !== "complete" && state !== "incomplete" && state !== "legacy") return null;
+  let manifest: ManifestEntry[] | undefined;
+  if (value.manifest !== undefined) {
+    if (!Array.isArray(value.manifest)) return null;
+    try {
+      manifest = value.manifest.map((entry) => {
+        const parsed = parseManifestEntry(entry);
+        assertSafeRelativePath(parsed.path, "marker manifest path");
+        return parsed;
+      });
+    } catch {
+      return null;
+    }
+  }
+  let directories: string[] | undefined;
+  if (value.directories !== undefined) {
+    if (!Array.isArray(value.directories)) return null;
+    try {
+      directories = value.directories.map((entry) => {
+        if (typeof entry !== "string" || entry.length === 0) throw new Error("invalid directory");
+        assertSafeRelativePath(entry, "marker directory path");
+        return entry;
+      });
+    } catch {
+      return null;
+    }
+  }
+  return {
+    plugin: "node-workspace",
+    protocol: 1,
+    pushId: value.pushId,
+    digest: value.digest,
+    files: value.files,
+    bytes: value.bytes,
+    createdAt: value.createdAt,
+    state,
+    ...(manifest !== undefined ? { manifest } : {}),
+    ...(directories !== undefined ? { directories } : {}),
+  };
+}
+
 function parseEnvelope(raw: unknown): Record<string, unknown> {
   if (typeof raw === "string") {
     try {
@@ -146,6 +205,6 @@ export async function readNodeTree(
     complete: value.complete === true,
     verified: value.verified === true,
     drift: typeof value.drift === "string" ? value.drift : null,
-    marker: (value.marker as Marker | null | undefined) ?? null,
+    marker: parseMarker(value.marker),
   };
 }
