@@ -2,11 +2,14 @@
 
 ## What is enforced
 
-- **Path authorization.** A Gateway push reads only inside `gateway.localRoots`; an artifact writes
-  only inside `gateway.artifactRoots`; a return writes only inside `gateway.returnRoots`; a node push
-  creates only below `node.pushRoots`; a node artifact reads only inside `node.artifactRoots`; a node
-  tree or return reads only inside `node.returnRoots`. Roots are resolved with `realpath`; an empty
-  list denies the operation.
+- **Path authorization.** The host resolves one workspace per session, and that workspace is the
+  Gateway boundary: a push reads, an artifact writes and a return writes only inside it. When the
+  host supplies no workspace, the plugin asks OpenClaw's own resolver for the agent workspace and,
+  without either, refuses with `workspace-unresolved` before touching the filesystem.
+  `gateway.localRoots`, `gateway.artifactRoots` and `gateway.returnRoots` are optional narrowing and
+  can never widen the workspace. On the node side a push creates only below `node.pushRoots`, an
+  artifact reads only inside `node.artifactRoots`, and a tree or return reads only inside
+  `node.returnRoots`; those roots remain mandatory. All roots are resolved with `realpath`.
 - **The return base is local state keyed by node and path.** A successful push or return writes
   `.nodews-return-state.json` (0600) with the node content it reconciled, keyed by `nodeId` and
   `remotePath`. Two nodes using the same absolute path never share a base. A node marker is used as
@@ -132,6 +135,7 @@ command allowlist and the configured roots are the authority boundary.
 | Duplicate or missing parent directory entry | `invalid-manifest`. |
 | Symlink inside the selected workspace | `symlink-rejected` (or omitted with `symlinks: "skip"`). |
 | Symlinked push destination or parent | `symlink-rejected`. |
+| Path outside the session workspace | `path-outside-root`, naming the workspace. |
 | Destination parent outside `pushRoots` | `path-outside-root`. |
 | Destination exists, no marker | `destination-exists`; the directory is untouched. |
 | Existing empty directory at the destination | `mkdir(2)` fails `EEXIST`; the directory stays empty. |

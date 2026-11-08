@@ -121,7 +121,8 @@ list and re-applies it locally. The response is JSON:
 only when the live scan matches the marker manifest byte for byte. The Gateway validates every
 returned path independently, re-derives the tree digest from the received manifest, and rejects a
 path with a traversal segment, a duplicate, a missing parent directory, or a digest that does not
-match. A compromised node therefore cannot redirect a return outside `gateway.returnRoots`. A changed generated tree is
+match. A compromised node therefore cannot redirect a return outside the session workspace (or outside
+`gateway.returnRoots` when that narrowing is set). A changed generated tree is
 normally `verified: false` while its marker still supplies the base manifest for conflict decisions.
 This command is read-only and bounded by the node limits.
 

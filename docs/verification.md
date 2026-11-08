@@ -1,13 +1,14 @@
 # Verification
 
-Every claim below was produced by a command in this repository. The date is the run recorded on
-2026-11-07, OpenClaw `2026.11.1`, Node `24.22.1`, Linux `6.18.57` (x86_64).
+Every claim below was produced by a command in this repository, on OpenClaw `2026.11.1`, Node
+`24.22.1`, Linux `6.18.57` (x86_64). The test counts and the integration transcript are from
+2026-11-08; the publish benchmarks are from 2026-11-07.
 
 ## What the layers prove
 
 | Layer | Command | Proves |
 | --- | --- | --- |
-| Unit and in-process transport | `npm test` | Paths, scanning, digests, framing, config, incremental publish, return plan, push/artifact/status/tree/return against real node handlers over a real ordered channel with real files. |
+| Unit and in-process transport | `npm test` | Paths, scanning, digests, framing, config, incremental publish, return plan, the session-workspace boundary and its agent fallback, push/artifact/status/tree/return against real node handlers over a real ordered channel with real files. |
 | Build | `npm run build` + `npm run typecheck` | The published `dist/` exists, typechecks strictly, and every runtime import is declared. |
 | Real plugin loader | `bash scripts/pack-and-inspect.sh` | The npm-pack tarball installs into a disposable state, the real loader reports `status: "loaded"`, and all five tools are registered. |
 | Two-process tool path | `bash scripts/integration-isolated.sh` | A real Gateway and node host pair; the registered tools are invoked through `tools.invoke`, publish over duplex frames, refuse an occupied destination, fetch an artifact exclusively, preview and return a generated file into the local project, and status verifies the published tree. |
@@ -18,10 +19,12 @@ Every claim below was produced by a command in this repository. The date is the 
 `npm test`:
 
 ```
-ℹ tests 102
-ℹ pass 102
+ℹ tests 110
+ℹ pass 110
 ℹ fail 0
 ```
+
+The suite passes under `umask 022` and `umask 077`.
 
 `bash scripts/pack-and-inspect.sh`:
 

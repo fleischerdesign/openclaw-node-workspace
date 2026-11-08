@@ -5,12 +5,26 @@
 1. Build and pack the plugin (`npm ci && npm run build && npm pack`).
 2. Install it on the **node host** first and restart that node. The Gateway must see all five
    commands in the node's advertised surface.
-3. Install it on the **Gateway**, enable it, configure `gateway.*`, and add the node command
-   allowlist.
+3. Install it on the **Gateway**, enable it, and add the node command allowlist. The Gateway needs no
+   configured project directory: it reads the workspace OpenClaw resolves for the calling session,
+   with the agent workspace as the fallback. Add `gateway.localRoots`, `gateway.artifactRoots` or
+   `gateway.returnRoots` only when you want to narrow that workspace further.
 4. Approve the node's updated command surface in **Devices** if OpenClaw asks after the reconnect.
 
 Installing only the Gateway half gives you tools that fail with a missing node command. Installing
 only the node half advertises commands that no tool calls.
+
+## The Gateway boundary
+
+The Gateway does not own a project list. OpenClaw resolves a workspace for each session and passes it
+to the plugin's tool factory; every `localPath` a tool accepts must resolve inside that workspace.
+When the host passes no workspace, the plugin resolves the agent workspace through OpenClaw's
+`resolveAgentWorkspaceDir`, and refuses with `workspace-unresolved` if that is unavailable too. A
+refusal names the workspace, so the caller sees which boundary applied.
+
+`gateway.localRoots`, `gateway.artifactRoots` and `gateway.returnRoots` are optional and only narrow
+the workspace; an empty or absent list adds no restriction. Use them when a session workspace is
+wider than the directories this plugin should touch.
 
 ## Configure the allowlist
 

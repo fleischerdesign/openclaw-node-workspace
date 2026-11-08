@@ -27,6 +27,9 @@ for the child process. Keep that property if you edit them.
   and keep the seam narrow.
 - Every path that crosses the channel is validated independently on the node. Do not replace the
   node's check with trust in the Gateway.
+- The Gateway's local authority is the workspace the host resolves for the calling session; a plugin
+  root may only narrow it. Never introduce a configured directory as the source of authority, and
+  never fall back to the process working directory.
 - Do not add an archive format. The frame protocol is flat on purpose; archive parsing is where
   traversal bugs live.
 - A failure that may have had an effect is `unknown-outcome`; never collapse it into `transport`.

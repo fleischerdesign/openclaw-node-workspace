@@ -42,6 +42,8 @@ the native `exec` tool, which retains its own approvals and node allowlists.
 | `src/frames.ts` | Binary frame codec (one control byte + JSON or file bytes). |
 | `src/transport.ts` | `FrameSession`: ordered frame queue, timeouts, closure semantics. |
 | `src/gateway/*` | Tool definitions, push/artifact/status/return engines, runtime adapter. |
+| `src/gateway/workspace-root.ts` | Chooses the session workspace, with the agent workspace as the fallback. |
+| `src/gateway/workspace-boundary.ts` | Resolves and checks the local boundary every gateway operation shares. |
 | `src/return-plan.ts` | Pure comparison of a node manifest, a local manifest and a base manifest; plan digest. |
 | `src/node/*` | Node command handlers, framed-session helpers and no-clobber filesystem helpers. |
 
@@ -63,10 +65,13 @@ protocol rather than an archive:
 
 ## Push lifecycle
 
-1. **Authorize and scan (Gateway).** `localPath` must be absolute, resolve inside a configured
-   `gateway.localRoots` entry, and be a real directory. The scan records every directory, every
-   regular file's SHA-256, size, and executable bit. Symlinks and special files fail the scan by
-   default. The tree digest is the SHA-256 of the canonical manifest JSON.
+1. **Authorize and scan (Gateway).** `localPath` must be absolute and be a real directory. The
+   authority is the workspace OpenClaw resolved for the calling session: the path must resolve inside
+   it, and `gateway.localRoots`, when set, narrows that further. A host that supplies no workspace
+   triggers the agent-workspace fallback and, without either, a `workspace-unresolved` refusal. The
+   scan records every directory, every regular file's SHA-256, size, and executable bit. Symlinks and
+   special files fail the scan by default. The tree digest is the SHA-256 of the canonical manifest
+   JSON.
 2. **Derive the push id.** `pushId = SHA-256(nodeId + "\n" + remotePath + "\n" + treeDigest)[0..32]`.
    Same content to the same destination is idempotent; different content is not.
 3. **Resolve an optional base.** With `incrementalFrom`, the Gateway calls `nodews.status` on the
@@ -116,8 +121,9 @@ A return reads a node directory and writes only the local changes an explicit pl
 1. **Read the node tree.** `node_workspace_changes` calls `nodews.tree`, which resolves a real
    directory inside `node.returnRoots`, scans it without following links, hashes every file, and
    returns an independent manifest plus the plugin marker for that directory.
-2. **Scan the local project.** The Gateway scans the local target inside `gateway.returnRoots` with
-   the same limits, skipping symlinks and excluding the caller's patterns. It never writes.
+2. **Scan the local project.** The Gateway scans the local target inside the session workspace (and
+   inside `gateway.returnRoots` when that list is set) with the same limits, skipping symlinks and
+   excluding the caller's patterns. It never writes.
 3. **Build a plan.** For every selected node file: absent locally is an addition; identical is
    unchanged; a different executable bit alone is a mode change when the local mode still matches
    the base; different content is a safe modification only when the local content still matches the
@@ -147,8 +153,9 @@ A return reads a node directory and writes only the local changes an explicit pl
 
 ## Artifact lifecycle
 
-1. The Gateway validates `localPath` inside `gateway.artifactRoots`, requires the parent to be a real
-   directory, and requires the destination not to exist.
+1. The Gateway validates `localPath` inside the session workspace (narrowed by
+   `gateway.artifactRoots` when set), requires the parent to be a real directory, and requires the
+   destination not to exist.
 2. `nodews.fetch` receives the request as command parameters. The node resolves the source with
    `lstat` + `realpath`, rejects symlinks and non-regular files, and enforces the artifact boundaries
    and size limits.

@@ -85,6 +85,17 @@ openclaw node restart
 Both halves read one config object; each uses its own namespace. A Gateway ignores `node.*`, and a
 node ignores `gateway.*`, so the same block can be copied to both.
 
+On the Gateway, the local boundary is **the workspace OpenClaw resolved for the calling session**, not
+a configured project directory. Every `localPath` a tool accepts must resolve inside it; when the
+host supplies no workspace the tool falls back to the agent workspace through OpenClaw's own
+resolver, and otherwise refuses with `workspace-unresolved`. The `gateway.localRoots`,
+`gateway.artifactRoots` and `gateway.returnRoots` lists are optional extra narrowing: leave them out
+for the plain workspace rule, or set them to restrict a push, an artifact destination or a return
+target further. They can never widen the workspace.
+
+The node side is unchanged: it has no session workspace and derives its authority only from the
+`node.*` roots, which remain mandatory for the operations they cover.
+
 ```json5
 {
   plugins: {
@@ -93,12 +104,12 @@ node ignores `gateway.*`, so the same block can be copied to both.
         enabled: true,
         config: {
           gateway: {
-            // A push may only read inside these real directories. Empty denies every push.
-            localRoots: ["/srv/projects"],
-            // An artifact may only be written inside these directories. Empty denies every fetch.
-            artifactRoots: ["/srv/incoming"],
-            // A returned project tree may only be written inside these directories. Empty denies every return.
-            returnRoots: ["/srv/projects"],
+            // Optional: narrows a push further than the session workspace.
+            localRoots: [],
+            // Optional: narrows an artifact destination further than the session workspace.
+            artifactRoots: [],
+            // Optional: narrows a return target further than the session workspace.
+            returnRoots: [],
             // minimatch patterns relative to the selected workspace root.
             exclude: [".git", "node_modules"],
             // "reject" fails on a symlink; "skip" omits it. Never follows links.
@@ -258,6 +269,7 @@ the Gateway `tools.invoke` boundary, which would otherwise flatten a thrown erro
 | Code | Meaning |
 | --- | --- |
 | `config-invalid` | Plugin config is missing or contradictory; nothing was dispatched. |
+| `workspace-unresolved` | The host resolved no workspace for this session and no agent workspace was available; nothing was read or written. |
 | `path-invalid`, `path-outside-root`, `path-not-found`, `not-a-directory` | Path rejected before transfer. |
 | `symlink-rejected`, `special-file-rejected` | The selected tree contains a link or non-regular file and the policy is not `skip`. |
 | `limit-exceeded` | File count or byte limits rejected the operation before publication. |
