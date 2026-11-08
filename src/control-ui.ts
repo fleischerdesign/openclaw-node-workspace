@@ -1,61 +1,18 @@
 import { createFeatureClient } from "openclaw/plugin-sdk/feature-contract";
 import { defineControlUiPlugin } from "openclaw/plugin-sdk/control-ui";
 
-import { nodeWorkspaceFeatureContract } from "./feature-contract.js";
-
-type Transfer = {
-  transferId: string;
-  kind: "push" | "fetch" | "return";
-  phase: "scanning" | "sending" | "publishing" | "fetching" | "receiving" | "applying";
-  state: "running" | "completed" | "failed" | "unknown" | "cancelled";
-  filesDone: number;
-  filesTotal: number;
-  bytesDone: number;
-  bytesTotal: number;
-  startedAt: number;
-  updatedAt: number;
-  finishedAt?: number;
-};
+import { nodeWorkspaceFeatureContract, PROGRESS_WIDGET_ID } from "./feature-contract.js";
+import {
+  ExpiryScheduler,
+  fraction,
+  MAX_ROWS,
+  rowLabel,
+  rowText,
+  visibleTransfers,
+  type Transfer,
+} from "./control-ui-model.js";
 
 type Snapshot = { transfers: readonly Transfer[]; observedAt: number };
-
-const MAX_ROWS = 3;
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-}
-
-function fraction(entry: Transfer): number {
-  if (entry.bytesTotal > 0) return Math.min(1, entry.bytesDone / entry.bytesTotal);
-  if (entry.filesTotal > 0) return Math.min(1, entry.filesDone / entry.filesTotal);
-  return 0;
-}
-
-function rowText(entry: Transfer): string {
-  const files = entry.filesTotal > 0 ? `${entry.filesDone}/${entry.filesTotal}` : `${entry.filesDone}`;
-  const bytes = `${formatBytes(entry.bytesDone)} / ${formatBytes(entry.bytesTotal)}`;
-  if (entry.state === "running") {
-    if (entry.kind === "fetch") return `fetching ${bytes}`;
-    if (entry.kind === "return") return `returning ${files} · ${formatBytes(entry.bytesDone)}`;
-    if (entry.phase === "scanning" && entry.filesTotal === 0) return "scanning";
-    if (entry.phase === "publishing") return `publishing ${files} · ${formatBytes(entry.bytesTotal)}`;
-    return `${entry.phase} ${files} · ${formatBytes(entry.bytesDone)}`;
-  }
-  if (entry.state === "completed") {
-    return `✓ ${entry.filesTotal > 0 ? `${entry.filesTotal} files · ` : ""}${formatBytes(entry.bytesTotal > 0 ? entry.bytesTotal : entry.bytesDone)}`;
-  }
-  if (entry.state === "unknown") return "unknown outcome";
-  if (entry.state === "cancelled") return "cancelled";
-  return "failed";
-}
-
-function rowLabel(entry: Transfer): string {
-  if (entry.kind === "push") return "Publish";
-  return entry.kind === "fetch" ? "Fetch" : "Return";
-}
 
 function makeRow(document: Document, entry: Transfer): { row: HTMLElement; label: HTMLElement; bar: HTMLElement } {
   const row = document.createElement("div");
@@ -92,9 +49,9 @@ function makeRow(document: Document, entry: Transfer): { row: HTMLElement; label
 export default defineControlUiPlugin({
   id: "node-workspace",
   activate(host) {
-    return host.ui.registerAccessory({
-      id: "node-workspace.transfer-progress",
-      placement: "session-header",
+    return host.ui.registerWidget({
+      id: PROGRESS_WIDGET_ID,
+      label: "node-workspace progress",
       mount(container, context) {
         const document = container.ownerDocument;
         const root = document.createElement("div");
@@ -111,10 +68,11 @@ export default defineControlUiPlugin({
         let errorText: string | undefined;
 
         const feature = createFeatureClient(nodeWorkspaceFeatureContract, context.host);
+        const expiry = new ExpiryScheduler(() => Date.now());
 
         const render = (): void => {
-          const transfers = last?.transfers ?? [];
-          if (errorText) {
+          expiry.cancel();
+          if (errorText && !last) {
             root.replaceChildren();
             const error = document.createElement("span");
             error.textContent = "progress unavailable";
@@ -123,6 +81,7 @@ export default defineControlUiPlugin({
             root.style.display = "flex";
             return;
           }
+          const transfers = visibleTransfers(last?.transfers ?? [], Date.now());
           if (transfers.length === 0) {
             root.replaceChildren();
             root.style.display = "none";
@@ -141,6 +100,9 @@ export default defineControlUiPlugin({
             root.append(row);
           }
           root.style.display = "flex";
+          // One local re-render when the next terminal entry expires; no RPC
+          // and no polling. Further updates arrive on progress-changed.
+          expiry.schedule(last?.transfers ?? [], render);
         };
 
         const restart = (): void => {
@@ -187,6 +149,7 @@ export default defineControlUiPlugin({
           dispose() {
             stopWatch?.();
             stopWatch = undefined;
+            expiry.cancel();
             root.remove();
           },
         };

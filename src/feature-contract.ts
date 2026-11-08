@@ -1,11 +1,16 @@
 import { Type } from "typebox";
 import { defineFeatureContract } from "openclaw/plugin-sdk/feature-contract";
 
+/** Widget id shared by the browser registration and the backend descriptor. */
+export const PROGRESS_WIDGET_ID = "node-workspace-progress";
+
 const transferPhase = Type.Union([
   Type.Literal("scanning"),
   Type.Literal("sending"),
   Type.Literal("publishing"),
   Type.Literal("fetching"),
+  Type.Literal("receiving"),
+  Type.Literal("applying"),
 ]);
 
 const transferState = Type.Union([
@@ -19,7 +24,7 @@ const transferState = Type.Union([
 export const transferProgressSchema = Type.Object(
   {
     transferId: Type.String({ minLength: 1, maxLength: 128 }),
-    kind: Type.Union([Type.Literal("push"), Type.Literal("fetch")]),
+    kind: Type.Union([Type.Literal("push"), Type.Literal("fetch"), Type.Literal("return")]),
     phase: transferPhase,
     state: transferState,
     filesDone: Type.Integer({ minimum: 0 }),
@@ -29,6 +34,8 @@ export const transferProgressSchema = Type.Object(
     startedAt: Type.Integer({ minimum: 0 }),
     updatedAt: Type.Integer({ minimum: 0 }),
     finishedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+    /** Machine-readable failure code, for example `path-outside-root`. */
+    reasonCode: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
   },
   { additionalProperties: false },
 );

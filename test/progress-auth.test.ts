@@ -36,6 +36,7 @@ function register() {
         registerSessionAction: (registered: typeof action) => {
           action = registered;
         },
+        registerControlUiDescriptor: () => undefined,
       },
     },
     registerService: () => undefined,

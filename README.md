@@ -158,13 +158,21 @@ openclaw config set gateway.nodes.commands.allow '["nodews.push","nodews.fetch",
 Both sides must agree on the command names, and the node must advertise them. A command denied by
 `gateway.nodes.commands.deny` stays denied even if it is also in `allow`.
 
-## Progress accessory
+## Progress widget
 
-The plugin can place a native accessory in the Control UI session header. It shows the measured
-scanning, sending, publishing, receiving and applying counters for the current session, with a
-determinate bar, and turns into a short completion, unknown-outcome or failure state. It is session-scoped: the query
-uses the session key and agent id supplied by the host, and the broadcast carries no counters,
-paths or node names. It does not use the shared progress card.
+The plugin registers one native dashboard widget, **node-workspace progress**, for the session
+dashboard beside chat. It shows the measured scanning, sending, publishing, receiving and applying
+counters for the current session with a determinate bar, and turns into a short completion,
+unknown-outcome or failure state. A failure names its machine-readable code, for example
+`failed · path-outside-root`, instead of a bare "failed". The widget is empty while there is no
+measurable transfer. It is session-scoped: the query uses the session key and agent id supplied by
+the host, and the broadcast carries no counters, paths or node names. It does not use the shared
+progress card, and it adds nothing to the transcript.
+
+The view refreshes when the plugin emits `progress-changed` and after a reconnect; it never polls.
+Terminal rows expire locally on the same schedule as the store (completed after 8 s, abnormal after
+60 s), and the view schedules one local re-render for the next expiry instead of asking the Gateway
+again.
 
 Native plugin UI is gated by the **Custom plugin UI** lab:
 
@@ -181,7 +189,7 @@ Native plugin UI is gated by the **Custom plugin UI** lab:
 Enable it in **Settings → Labs → Custom plugin UI**, or with the config above. The Control UI must
 be opened from the same Gateway over HTTPS or a browser-trusted loopback URL such as
 `http://127.0.0.1:18789/`. Plain HTTP on a LAN address can serve the dashboard but cannot set the
-secure cookies required for native plugin assets. Disabling the lab removes the accessory; it does
+secure cookies required for native plugin assets. Disabling the lab removes the widget; it does
 not uninstall the plugin or stop its backend operations.
 
 ## Use

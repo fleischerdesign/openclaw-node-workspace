@@ -576,7 +576,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                 : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
                   ? "cancelled"
                   : "failed";
-            tracked?.store.finish(tracked.scope, transferId, state);
+            const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
+            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
             deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_push", error, context);
@@ -655,7 +656,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                 : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
                   ? "cancelled"
                   : "failed";
-            tracked?.store.finish(tracked.scope, transferId, state);
+            const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
+            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
             deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_artifact", error, context);
@@ -903,7 +905,8 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                 : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
                   ? "cancelled"
                   : "failed";
-            tracked?.store.finish(tracked.scope, transferId, state);
+            const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
+            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
             deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_return", error, context);

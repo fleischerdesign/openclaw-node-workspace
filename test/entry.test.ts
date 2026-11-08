@@ -30,7 +30,12 @@ test("the plugin registers its five tools, five node commands and one invoke pol
         list: async () => ({ nodes: await harness.transport.listNodes() }),
       },
     },
-    session: { controls: { registerSessionAction: () => undefined } },
+    session: {
+      controls: {
+        registerSessionAction: () => undefined,
+        registerControlUiDescriptor: () => undefined,
+      },
+    },
     registerService: () => undefined,
     registerTool: (tool: unknown) => {
       const candidates =
@@ -111,6 +116,7 @@ test("the registered push tool publishes through the injected runtime and return
     session: {
       controls: {
         registerSessionAction: () => undefined,
+        registerControlUiDescriptor: () => undefined,
       },
     },
     registerService: () => undefined,
@@ -209,7 +215,12 @@ test("the tool factory falls back to the agent workspace when the session provid
       },
       config: { current: () => ({}) },
     },
-    session: { controls: { registerSessionAction: () => undefined } },
+    session: {
+      controls: {
+        registerSessionAction: () => undefined,
+        registerControlUiDescriptor: () => undefined,
+      },
+    },
     registerService: () => undefined,
     registerTool: (tool: unknown) => {
       const candidates =

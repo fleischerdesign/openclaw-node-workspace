@@ -2,6 +2,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { OpenClawPluginGatewayEvents, PluginJsonValue } from "openclaw/plugin-sdk/plugin-entry";
 
 import { resolvePluginConfig } from "./config.js";
+import { PROGRESS_WIDGET_ID } from "./feature-contract.js";
 import { errorMessage } from "./errors.js";
 import { ProgressEventCoalescer } from "./gateway/progress-events.js";
 import { TransferProgressStore, type TransferScope } from "./gateway/progress-store.js";
@@ -77,6 +78,16 @@ export default definePluginEntry({
           result: { transfers: progress.snapshot(scope), observedAt: Date.now() } as unknown as PluginJsonValue,
         };
       },
+    });
+
+    // The native widget renders only when this backend descriptor advertises
+    // the same id for the connection's scopes; the browser half lives in
+    // control-ui.ts and shares PROGRESS_WIDGET_ID.
+    api.session.controls.registerControlUiDescriptor({
+      surface: "widget",
+      id: PROGRESS_WIDGET_ID,
+      label: "node-workspace progress",
+      requiredScopes: ["operator.read"],
     });
 
     api.registerService({

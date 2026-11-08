@@ -22,6 +22,7 @@ export interface TransferProgress {
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
+  reasonCode?: string;
 }
 
 const RUNNING_TTL_MS = 15 * 60 * 1000;
@@ -114,13 +115,19 @@ export class TransferProgressStore {
     });
   }
 
-  finish(scope: TransferScope, transferId: string, state: Exclude<TransferState, "running">): void {
+  finish(
+    scope: TransferScope,
+    transferId: string,
+    state: Exclude<TransferState, "running">,
+    reasonCode?: string,
+  ): void {
     const entry = this.#scopes.get(scopeKey(scope))?.get(transferId);
     if (!entry || entry.state !== "running") return;
     const now = this.#clock();
     entry.state = state;
     entry.updatedAt = now;
     entry.finishedAt = now;
+    if (reasonCode) entry.reasonCode = reasonCode;
     if (state === "completed" && entry.filesTotal === 0) {
       // A completed snapshot with no counters is still useful as a terminal
       // signal, but must not claim a file count it never measured.
@@ -149,7 +156,7 @@ export class TransferProgressStore {
     const now = this.#clock();
     for (const [key, entries] of this.#scopes) {
       for (const [id, entry] of entries) {
-        const age = now - entry.updatedAt;
+        const age = now - (entry.finishedAt ?? entry.updatedAt);
         const ttl =
           entry.state === "running"
             ? RUNNING_TTL_MS

@@ -127,6 +127,7 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
   const afterConflict = progress.snapshot(scope);
   assert.equal(afterConflict.length, 2);
   assert.equal(afterConflict[1]?.state, "failed");
+  assert.equal(afterConflict[1]?.reasonCode, "destination-exists");
   assert.ok(!("localPath" in afterConflict[1]!));
   assert.ok(!("remotePath" in afterConflict[1]!));
   for (let index = 1; index < parsed.length; index += 1) {
