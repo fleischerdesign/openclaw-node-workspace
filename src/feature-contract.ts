@@ -4,12 +4,12 @@ import { defineFeatureContract } from "openclaw/plugin-sdk/feature-contract";
 /**
  * Widget id shared by the browser registration and the backend descriptor.
  *
- * The dashboard addresses a plugin widget as `<pluginId>:<name>` and looks the
- * kind up in the list the Gateway advertises on connect; an id without the
- * colon never matches, and the board then reports "widget from disabled
- * plugin".
+ * It is the name only. The Gateway composes the kind a board addresses as
+ * `<pluginId>:<descriptor.id>` and the client splits it the same way, so an id
+ * that repeats the plugin id (or omits it entirely) never matches the widget
+ * the browser registered, and the board reports "widget from disabled plugin".
  */
-export const PROGRESS_WIDGET_ID = "node-workspace:progress";
+export const PROGRESS_WIDGET_ID = "progress";
 
 const transferPhase = Type.Union([
   Type.Literal("scanning"),

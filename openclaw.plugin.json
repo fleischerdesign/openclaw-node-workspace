@@ -128,7 +128,7 @@
     }
   },
   "controlUi": {
-    "entry": "dist/control-ui/b4fc2c805bde770a0618ac8536992b86534e33b2994903859a80ef9b11b6a680/index.js",
+    "entry": "dist/control-ui/bb5d501232912b2a7de708a3d2e979038101e07bb652941961d8aaa619185adc/index.js",
     "styles": []
   }
 }
