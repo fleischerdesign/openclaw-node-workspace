@@ -6,10 +6,17 @@ import type { GatewayConfig } from "../config.js";
 import { derivePushId } from "../digest.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
 import { scanWorkspace, type ScanResult } from "../manifest.js";
-import { RETURN_STATE_FILE, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { RETURN_STATE_FILE, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_PUSH, PROTOCOL_VERSION, PUSH_ACK_BYTES, PUSH_ACK_FILES } from "../protocol.js";
 import { workspaceStatus } from "./status.js";
 import { writeReturnState } from "./return-state.js";
+import {
+  assertLocalAccess,
+  isInsideNarrowing,
+  isInsideWorkspace,
+  resolveWorkspaceBoundary,
+  type WorkspaceBoundary,
+} from "./workspace-boundary.js";
 import {
   assertControlFrame,
   controlType,
@@ -30,6 +37,8 @@ export interface PushInput {
   readonly node: string;
   readonly localPath: string;
   readonly remotePath: string;
+  /** Workspace directory the host resolved for this session; absent fails closed. */
+  readonly workspaceRoot: string | undefined;
   /** A previously published generation whose unchanged files are reused on the node. */
   readonly incrementalFrom: string | undefined;
   readonly exclude: readonly string[] | undefined;
@@ -59,18 +68,16 @@ const DEFAULT_FRAME_TIMEOUT_MS = 120_000;
 
 /**
  * A push may write a return baseline only when the local project is also a
- * configured return target. Reading a directory grants no write authority.
+ * return target. The session workspace is the boundary; `gateway.returnRoots`,
+ * when set, narrows it further.
  */
-async function canRecordReturnState(root: string, config: GatewayConfig): Promise<boolean> {
-  for (const candidate of config.returnRoots) {
-    try {
-      const real = await fs.realpath(candidate);
-      if (isWithin(real, root)) return true;
-    } catch {
-      // A configured root that does not exist grants nothing.
-    }
-  }
-  return false;
+async function canRecordReturnState(
+  root: string,
+  config: GatewayConfig,
+  boundary: WorkspaceBoundary,
+): Promise<boolean> {
+  if (!isInsideWorkspace(boundary, root)) return false;
+  return await isInsideNarrowing(config.returnRoots, root);
 }
 
 function checkAborted(signal: AbortSignal | undefined): void {
@@ -79,13 +86,11 @@ function checkAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-async function resolveLocalWorkspace(localPath: string, config: GatewayConfig): Promise<string> {
-  if (config.localRoots.length === 0) {
-    throw new NodeWorkspaceError(
-      "config-invalid",
-      "gateway.localRoots is empty; configure at least one absolute directory before pushing",
-    );
-  }
+async function resolveLocalWorkspace(
+  localPath: string,
+  config: GatewayConfig,
+  boundary: WorkspaceBoundary,
+): Promise<string> {
   const normalized = normalizeAbsolutePosixPath(localPath);
   let real: string;
   try {
@@ -97,24 +102,7 @@ async function resolveLocalWorkspace(localPath: string, config: GatewayConfig): 
   if (!stat.isDirectory()) {
     throw new NodeWorkspaceError("not-a-directory", `workspace is not a directory: ${real}`);
   }
-
-  const roots: string[] = [];
-  for (const root of config.localRoots) {
-    try {
-      const realRoot = await fs.realpath(root);
-      const rootStat = await fs.lstat(realRoot);
-      if (rootStat.isDirectory()) roots.push(realRoot);
-    } catch {
-      // A configured root that does not exist grants nothing.
-    }
-  }
-  const allowed = roots.some((root) => isWithin(root, real));
-  if (!allowed) {
-    throw new NodeWorkspaceError(
-      "path-outside-root",
-      `workspace ${real} is outside every configured gateway.localRoots entry`,
-    );
-  }
+  await assertLocalAccess(boundary, real, "workspace", config.localRoots, "gateway.localRoots");
   return real;
 }
 
@@ -165,7 +153,8 @@ export async function pushWorkspace(
   const startedAt = Date.now();
   const deadline = startedAt + config.timeoutMs;
   const nodeId = await resolveNodeId(transport, input.node);
-  const root = await resolveLocalWorkspace(input.localPath, config);
+  const boundary = await resolveWorkspaceBoundary(input.workspaceRoot, "push a workspace");
+  const root = await resolveLocalWorkspace(input.localPath, config, boundary);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
   // The local return baseline and staging directory are plugin-owned and
   // must never be published as project content.
@@ -234,7 +223,7 @@ export async function pushWorkspace(
 
   const pushId = derivePushId(nodeId, remotePath, scan.treeDigest);
   const recordState = async (): Promise<boolean> => {
-    if (!(await canRecordReturnState(root, config))) return false;
+    if (!(await canRecordReturnState(root, config, boundary))) return false;
     return await writeReturnState(
       root,
       nodeId,

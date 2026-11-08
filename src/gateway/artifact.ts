@@ -6,9 +6,14 @@ import path from "node:path";
 
 import type { GatewayConfig } from "../config.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
-import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_FETCH } from "../protocol.js";
 import { fsyncDirectory, safeArtifactMode } from "../node/fs-atomic.js";
+import {
+  assertLocalAccess,
+  resolveWorkspaceBoundary,
+  type WorkspaceBoundary,
+} from "./workspace-boundary.js";
 import {
   assertControlFrame,
   controlType,
@@ -21,6 +26,8 @@ export interface ArtifactInput {
   readonly node: string;
   readonly remotePath: string;
   readonly localPath: string;
+  /** Workspace directory the host resolved for this session; absent fails closed. */
+  readonly workspaceRoot: string | undefined;
   readonly signal: AbortSignal | undefined;
   readonly progress: ((bytesDone: number, bytesTotal: number) => void) | undefined;
 }
@@ -35,13 +42,8 @@ export interface ArtifactOutcome {
 async function resolveLocalDestination(
   localPath: string,
   config: GatewayConfig,
-): Promise<{ destination: string; parent: string; root: string }> {
-  if (config.artifactRoots.length === 0) {
-    throw new NodeWorkspaceError(
-      "config-invalid",
-      "gateway.artifactRoots is empty; configure at least one absolute directory before fetching artifacts",
-    );
-  }
+  boundary: WorkspaceBoundary,
+): Promise<{ destination: string; parent: string }> {
   const normalized = normalizeAbsolutePosixPath(localPath);
   const parentCandidate = path.posix.dirname(normalized);
   const name = path.posix.basename(normalized);
@@ -60,23 +62,7 @@ async function resolveLocalDestination(
     throw new NodeWorkspaceError("path-invalid", "destination parent must be a real directory");
   }
   const parent = await fs.realpath(parentCandidate);
-  const roots: string[] = [];
-  for (const root of config.artifactRoots) {
-    try {
-      const realRoot = await fs.realpath(root);
-      const stat = await fs.lstat(realRoot);
-      if (stat.isDirectory()) roots.push(realRoot);
-    } catch {
-      // A configured root that does not exist grants nothing.
-    }
-  }
-  const match = roots.find((root) => isWithin(root, parent));
-  if (match === undefined) {
-    throw new NodeWorkspaceError(
-      "path-outside-root",
-      `destination parent ${parent} is outside every configured gateway.artifactRoots entry`,
-    );
-  }
+  await assertLocalAccess(boundary, parent, "artifact destination parent", config.artifactRoots, "gateway.artifactRoots");
   try {
     await fs.lstat(normalized);
     throw new NodeWorkspaceError(
@@ -89,7 +75,7 @@ async function resolveLocalDestination(
       throw new NodeWorkspaceError("io", `cannot inspect ${normalized}: ${errorMessage(error)}`, {}, { cause: error });
     }
   }
-  return { destination: path.posix.join(parent, name), parent, root: match };
+  return { destination: path.posix.join(parent, name), parent };
 }
 
 async function publishExclusive(temp: string, destination: string): Promise<"linked" | "copied"> {
@@ -122,7 +108,8 @@ export async function fetchArtifact(
 ): Promise<ArtifactOutcome> {
   const nodeId = await resolveNodeId(transport, input.node);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
-  const local = await resolveLocalDestination(input.localPath, config);
+  const boundary = await resolveWorkspaceBoundary(input.workspaceRoot, "fetch an artifact");
+  const local = await resolveLocalDestination(input.localPath, config, boundary);
   if (input.signal?.aborted) throw new NodeWorkspaceError("canceled", "the fetch was canceled");
 
   const temp = path.posix.join(local.parent, `.${path.basename(local.destination)}.nodews-part-${randomUUID()}`);

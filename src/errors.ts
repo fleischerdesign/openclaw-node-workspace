@@ -2,6 +2,7 @@ export type NodeWorkspaceErrorCode =
   | "config-invalid"
   | "path-invalid"
   | "path-outside-root"
+  | "workspace-unresolved"
   | "path-not-found"
   | "not-a-directory"
   | "symlink-rejected"

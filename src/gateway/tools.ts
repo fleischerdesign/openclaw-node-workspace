@@ -15,6 +15,10 @@ export interface ToolDependencies {
   readonly transport: NodeTransport;
   readonly config: GatewayConfig | undefined;
   readonly configError: string | undefined;
+  /** Workspace directory the host resolved for this session; absent fails closed. */
+  readonly workspaceDir?: string | undefined;
+  /** Why the host resolved no workspace; explained in the refusal. */
+  readonly workspaceError?: string | undefined;
   /** Session identity supplied by the host; absent for direct in-process tests. */
   readonly scope?: TransferScope;
   /** Session-scoped measured progress registry. */
@@ -39,6 +43,19 @@ function requireConfig(deps: ToolDependencies): GatewayConfig {
     throw new NodeWorkspaceError("config-invalid", deps.configError ?? "plugin configuration is invalid");
   }
   return deps.config;
+}
+
+/**
+ * The workspace authority for this registration.
+ *
+ * A missing workspace is reported as `workspace-unresolved` at the point a
+ * path is checked, so the caller sees which directory it lacked rather than a
+ * generic failure.
+ */
+function requireWorkspace(deps: ToolDependencies, operation: string): string {
+  if (deps.workspaceDir !== undefined && deps.workspaceDir.length > 0) return deps.workspaceDir;
+  const detail = deps.workspaceError ?? "the host resolved no workspace directory for this session";
+  throw new NodeWorkspaceError("workspace-unresolved", `${detail}; refusing to ${operation}`);
 }
 
 export interface ToolFailure {
@@ -186,7 +203,9 @@ const pushParameters = Type.Object(
     node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
     localPath: Type.String({
       minLength: 1,
-      description: "Absolute path of the Gateway directory to publish. Must be inside gateway.localRoots.",
+      description:
+        "Absolute path of the Gateway directory to publish. It must resolve inside the session workspace; " +
+        "gateway.localRoots, when set, narrows that further.",
     }),
     remotePath: Type.String({
       minLength: 1,
@@ -259,7 +278,8 @@ const artifactParameters = Type.Object(
     localPath: Type.String({
       minLength: 1,
       description:
-        "Absolute destination file on the Gateway. Must be inside gateway.artifactRoots and must not exist; it is never overwritten.",
+        "Absolute destination file on the Gateway. It must resolve inside the session workspace; " +
+        "gateway.artifactRoots, when set, narrows that further. It must not exist; it is never overwritten.",
     }),
   },
   { additionalProperties: false },
@@ -338,7 +358,9 @@ const changesParameters = Type.Object(
     }),
     localPath: Type.String({
       minLength: 1,
-      description: "Absolute local project directory to compare against. Must be inside gateway.returnRoots.",
+      description:
+        "Absolute local project directory to compare against. It must resolve inside the session workspace; " +
+        "gateway.returnRoots, when set, narrows that further.",
     }),
     include: Type.Optional(
       Type.Array(Type.String({ minLength: 1 }), { description: "Optional minimatch patterns to select node paths." }),
@@ -354,7 +376,12 @@ const returnParameters = Type.Object(
   {
     node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
     remotePath: Type.String({ minLength: 1, description: "Absolute node directory. Must be inside node.returnRoots." }),
-    localPath: Type.String({ minLength: 1, description: "Absolute local project directory. Must be inside gateway.returnRoots." }),
+    localPath: Type.String({
+      minLength: 1,
+      description:
+        "Absolute local project directory. It must resolve inside the session workspace; " +
+        "gateway.returnRoots, when set, narrows that further.",
+    }),
     planDigest: Type.String({
       minLength: 64,
       maxLength: 64,
@@ -445,8 +472,8 @@ const returnDetails = Type.Object(
 const MAX_REPORTED_PATHS = MAX_RETURN_OPERATIONS;
 
 export function createTools(deps: ToolDependencies): AnyAgentTool[] {
-  // Deliberately absolute-path only: a relative path would silently depend on
-  // whichever workspace the agent happens to run in.
+  // Deliberately absolute-path only: a relative path would otherwise depend on
+  // the process working directory instead of the workspace the host resolved.
   return [
     {
       name: "node_workspace_push",
@@ -467,12 +494,14 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         try {
           const config = requireConfig(deps);
           const input = parsePushParams(params);
+          const workspaceRoot = requireWorkspace(deps, "push a workspace");
           context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
           tracked?.store.begin(tracked.scope, transferId, "push");
           const outcome = await pushWorkspace(deps.transport, config, {
             node: input.node,
             localPath: input.localPath,
             remotePath: input.remotePath,
+            workspaceRoot,
             incrementalFrom: input.incrementalFrom,
             exclude: input.exclude,
             signal,
@@ -572,12 +601,14 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         try {
           const config = requireConfig(deps);
           const input = parseArtifactParams(params);
+          const workspaceRoot = requireWorkspace(deps, "fetch an artifact");
           context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
           tracked?.store.begin(tracked.scope, transferId, "fetch");
           const outcome = await fetchArtifact(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
             localPath: input.localPath,
+            workspaceRoot,
             signal,
             progress: (bytesDone, bytesTotal) => {
               tracked?.store.updateFetch(tracked.scope, transferId, bytesDone, bytesTotal);
@@ -691,11 +722,13 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         try {
           const config = requireConfig(deps);
           const input = parseReturnParams(params, false);
+          const workspaceRoot = requireWorkspace(deps, "preview a return");
           context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
           const preview = await previewReturn(deps.transport, config, {
             node: input.node,
             remotePath: input.remotePath,
             localPath: input.localPath,
+            workspaceRoot,
             include: input.include,
             exclude: input.exclude,
             signal,
@@ -788,6 +821,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         try {
           const config = requireConfig(deps);
           const input = parseReturnParams(params, true);
+          const workspaceRoot = requireWorkspace(deps, "return a project tree");
           if (input.planDigest === undefined) {
             throw new NodeWorkspaceError("path-invalid", "planDigest is required");
           }
@@ -797,6 +831,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             node: input.node,
             remotePath: input.remotePath,
             localPath: input.localPath,
+            workspaceRoot,
             include: input.include,
             exclude: input.exclude,
             planDigest: input.planDigest,

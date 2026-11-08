@@ -29,13 +29,15 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Optional. Narrows a push beyond the session workspace; empty means no additional restriction."
           },
           "artifactRoots": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Optional. Narrows an artifact destination beyond the session workspace; empty means no additional restriction."
           },
           "exclude": {
             "type": "array",
@@ -78,7 +80,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Optional. Narrows a return target beyond the session workspace; empty means no additional restriction."
           }
         }
       },

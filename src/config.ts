@@ -5,11 +5,21 @@ import { NodeWorkspaceError } from "./errors.js";
 export type SymlinkPolicy = "reject" | "skip";
 
 export interface GatewayConfig {
-  /** Absolute directories a push may read from. Empty denies every push. */
+  /**
+   * Optional narrowing for a push. The session workspace the host resolves is
+   * the authority; this list can only restrict it further. Empty means no
+   * additional restriction.
+   */
   readonly localRoots: readonly string[];
-  /** Absolute directories an artifact may be written into. Empty denies every fetch. */
+  /**
+   * Optional narrowing for an artifact destination. Empty means no additional
+   * restriction beyond the session workspace.
+   */
   readonly artifactRoots: readonly string[];
-  /** Absolute directories a returned project tree may be written into. Empty denies every return. */
+  /**
+   * Optional narrowing for a returned project tree. Empty means no additional
+   * restriction beyond the session workspace.
+   */
   readonly returnRoots: readonly string[];
   readonly exclude: readonly string[];
   readonly symlinks: SymlinkPolicy;
@@ -93,8 +103,8 @@ function positiveInteger(value: unknown, label: string, fallback: number, maximu
  *
  * The host validates the manifest schema, but a node and a Gateway may run
  * different plugin versions, so each side revalidates what it uses. Invalid
- * configuration fails closed: no root means no access, never the working
- * directory.
+ * configuration fails closed: no root means no additional narrowing, never a
+ * grant, and the session workspace remains the only authority for local paths.
  */
 export function resolvePluginConfig(raw: unknown): PluginConfig {
   const root = record(raw, "plugin config");

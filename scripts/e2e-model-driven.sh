@@ -110,15 +110,17 @@ npm pack --pack-destination "$WORK" >/dev/null
 TARBALL="$(ls "$WORK"/*.tgz)"
 
 mkdir -p "$WORK/gateway/home" "$WORK/gateway/state" "$WORK/node/home" "$WORK/node/state"
-mkdir -p "$WORK/gateway-root/src/nested" "$WORK/gateway-root/artifacts" "$WORK/node-root"
-printf 'hello from the gateway workspace\n' > "$WORK/gateway-root/src/hello.txt"
-printf 'nested file\n' > "$WORK/gateway-root/src/nested/notes.md"
-printf '#!/bin/sh\necho run\n' > "$WORK/gateway-root/src/run.sh"
-chmod 0755 "$WORK/gateway-root/src/run.sh"
+GW_WORKSPACE="$WORK/gateway/state/workspace"
+GW_ROOT="$GW_WORKSPACE/gateway-root"
+mkdir -p "$GW_ROOT/src/nested" "$GW_ROOT/artifacts" "$WORK/node-root"
+printf 'hello from the gateway workspace\n' > "$GW_ROOT/src/hello.txt"
+printf 'nested file\n' > "$GW_ROOT/src/nested/notes.md"
+printf '#!/bin/sh\necho run\n' > "$GW_ROOT/src/run.sh"
+chmod 0755 "$GW_ROOT/src/run.sh"
 
 REMOTE_DIR="$WORK/node-root/agent-workspace"
 ARTIFACT_REMOTE="$REMOTE_DIR/exec-result.txt"
-ARTIFACT_LOCAL="$WORK/gateway-root/artifacts/exec-result.txt"
+ARTIFACT_LOCAL="$GW_ROOT/artifacts/exec-result.txt"
 
 export NODEWS_WORK="$WORK" NODEWS_PORT="$PORT"
 cat > "$WORK/isolated" <<'HELPER'
@@ -206,8 +208,8 @@ const gateway = {
       "node-workspace": {
         config: {
           gateway: {
-            localRoots: [path.join(work, "gateway-root", "src")],
-            artifactRoots: [path.join(work, "gateway-root", "artifacts")],
+            localRoots: [path.join(work, "gateway", "state", "workspace", "gateway-root", "src")],
+            artifactRoots: [path.join(work, "gateway", "state", "workspace", "gateway-root", "artifacts")],
           },
         },
       },
@@ -237,7 +239,7 @@ isolated node openclaw config patch --file "$WORK/node-patch.json" >/dev/null
 stage "start scripted model endpoint on $STUB_PORT"
 STUB_TRACE="$WORK/model-trace.jsonl" \
 STUB_PORT="$STUB_PORT" \
-STUB_PUSH_LOCAL="$WORK/gateway-root/src" \
+STUB_PUSH_LOCAL="$GW_ROOT/src" \
 STUB_PUSH_REMOTE="$REMOTE_DIR" \
 STUB_NODE_NAME="e2e-node" \
 STUB_ARTIFACT_REMOTE="$ARTIFACT_REMOTE" \

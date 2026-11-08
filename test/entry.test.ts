@@ -35,9 +35,10 @@ test("the plugin registers its five tools, five node commands and one invoke pol
     registerTool: (tool: unknown) => {
       const candidates =
         typeof tool === "function"
-          ? (tool as (ctx: { sessionKey?: string; agentId?: string }) => unknown)({
+          ? (tool as (ctx: { sessionKey?: string; agentId?: string; workspaceDir?: string }) => unknown)({
               sessionKey: "agent:main:test",
               agentId: "main",
+              workspaceDir: os.tmpdir(),
             })
           : tool;
       for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
@@ -116,9 +117,10 @@ test("the registered push tool publishes through the injected runtime and return
     registerTool: (tool: unknown) => {
       const candidates =
         typeof tool === "function"
-          ? (tool as (ctx: { sessionKey?: string; agentId?: string }) => unknown)({
+          ? (tool as (ctx: { sessionKey?: string; agentId?: string; workspaceDir?: string }) => unknown)({
               sessionKey: "agent:main:test",
               agentId: "main",
+              workspaceDir: source,
             })
           : tool;
       for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
@@ -176,6 +178,66 @@ test("the registered push tool publishes through the injected runtime and return
     const { Value } = await import("typebox/value");
     assert.equal(Value.Check(pushTool.outputSchema as never, bad.details), true);
   }
+});
+
+test("the tool factory falls back to the agent workspace when the session provides none", async () => {
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-entry-fallback-"));
+  const destination = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-entry-fallback-dst-"));
+  await fs.writeFile(path.join(source, "a.txt"), "alpha");
+  const raw = { gateway: { timeoutMs: 20_000 }, node: { pushRoots: [destination] } };
+  const harness = createHarness(createNodeCommands(raw).commands);
+  type PushTool = {
+    execute: (id: string, params: unknown) => Promise<{ content: { text: string }[]; details: Record<string, unknown> }>;
+  };
+  let pushTool: PushTool | undefined;
+  let resolverCalls = 0;
+
+  const api = {
+    pluginConfig: raw,
+    runtime: {
+      nodes: {
+        openDuplex: (request: Parameters<typeof harness.transport.openDuplex>[0]) =>
+          harness.transport.openDuplex(request),
+        invoke: (request: Parameters<typeof harness.transport.invoke>[0]) => harness.transport.invoke(request),
+        list: async () => ({ nodes: await harness.transport.listNodes() }),
+      },
+      agent: {
+        resolveAgentWorkspaceDir: () => {
+          resolverCalls += 1;
+          return source;
+        },
+      },
+      config: { current: () => ({}) },
+    },
+    session: { controls: { registerSessionAction: () => undefined } },
+    registerService: () => undefined,
+    registerTool: (tool: unknown) => {
+      const candidates =
+        typeof tool === "function"
+          ? (tool as (ctx: { sessionKey?: string; agentId?: string }) => unknown)({
+              sessionKey: "agent:main:fallback",
+              agentId: "main",
+            })
+          : tool;
+      for (const candidate of Array.isArray(candidates) ? candidates : [candidates]) {
+        if ((candidate as { name?: string }).name === "node_workspace_push") pushTool = candidate as PushTool;
+      }
+    },
+    registerNodeHostCommand: () => undefined,
+    registerNodeInvokePolicy: () => undefined,
+  };
+  entry.register(api as unknown as OpenClawPluginApi);
+  assert.ok(pushTool);
+
+  const result = await pushTool.execute("call-fallback", {
+    node: "node-1",
+    localPath: source,
+    remotePath: path.join(destination, "app"),
+  });
+  assert.equal(result.details.ok, true);
+  assert.equal(result.details.nodeId, "node-1");
+  assert.equal(resolverCalls, 1);
+  assert.equal(await fs.readFile(path.join(destination, "app", "a.txt"), "utf8"), "alpha");
 });
 
 test("toolFailure preserves unknown-outcome as an actionable tool result", async () => {

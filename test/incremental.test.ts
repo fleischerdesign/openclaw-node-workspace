@@ -54,6 +54,7 @@ const input = (sourceRoot: string, remotePath: string) => ({
   node: "node-1",
   localPath: sourceRoot,
   remotePath,
+  workspaceRoot: sourceRoot,
   incrementalFrom: undefined as string | undefined,
   exclude: undefined,
   signal: undefined,

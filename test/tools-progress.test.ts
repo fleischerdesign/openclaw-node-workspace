@@ -56,6 +56,7 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
     transport: harness.transport,
     config: config.gateway,
     configError: undefined,
+    workspaceDir: sourceRoot,
     scope,
     progress,
     onProgressChange: () => (notifications += 1),

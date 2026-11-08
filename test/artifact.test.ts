@@ -47,6 +47,7 @@ test("artifact fetch writes verified bytes and never overwrites", async () => {
     node: "node-1",
     remotePath: path.join(nodeRoot, "result.json"),
     localPath,
+    workspaceRoot: gatewayRoot,
     signal: undefined,
     progress: undefined,
   });
@@ -60,6 +61,7 @@ test("artifact fetch writes verified bytes and never overwrites", async () => {
         node: "node-1",
         remotePath: path.join(nodeRoot, "result.json"),
         localPath,
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -67,8 +69,8 @@ test("artifact fetch writes verified bytes and never overwrites", async () => {
   );
 });
 
-test("artifact destination must be inside gateway.artifactRoots", async () => {
-  const { nodeRoot, config, harness } = await setup();
+test("artifact destination must be inside the session workspace", async () => {
+  const { nodeRoot, gatewayRoot, config, harness } = await setup();
   await fs.writeFile(path.join(nodeRoot, "a.txt"), "a");
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-out-"));
   await assert.rejects(
@@ -77,6 +79,7 @@ test("artifact destination must be inside gateway.artifactRoots", async () => {
         node: "node-1",
         remotePath: path.join(nodeRoot, "a.txt"),
         localPath: path.join(outside, "a.txt"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -95,6 +98,7 @@ test("artifact source outside the node roots and symlinked artifacts are rejecte
         node: "node-1",
         remotePath: path.join(outside, "secret.txt"),
         localPath: path.join(gatewayRoot, "secret.txt"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -108,6 +112,7 @@ test("artifact source outside the node roots and symlinked artifacts are rejecte
         node: "node-1",
         remotePath: path.join(nodeRoot, "link.txt"),
         localPath: path.join(gatewayRoot, "link.txt"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -138,6 +143,7 @@ test("artifact bytes are rejected when the node's completion digest disagrees", 
         node: "node-1",
         remotePath: path.join(nodeRoot, "a.txt"),
         localPath: path.join(gatewayRoot, "a.txt"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -155,6 +161,7 @@ test("artifact size limit is enforced on both sides", async () => {
         node: "node-1",
         remotePath: path.join(nodeRoot, "big.txt"),
         localPath: path.join(gatewayRoot, "big.txt"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),
@@ -185,6 +192,7 @@ test("status distinguishes absent, foreign and plugin-owned destinations", async
   const pushed = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: gatewayRoot,
+    workspaceRoot: gatewayRoot,
     remotePath: path.join(nodeRoot, "owned"),
     exclude: undefined,
     signal: undefined,
@@ -208,6 +216,7 @@ test("a remote 0777 artifact becomes owner-only on the Gateway", async () => {
     node: "node-1",
     remotePath: source,
     localPath: target,
+    workspaceRoot: gatewayRoot,
     signal: undefined,
     progress: undefined,
   });
@@ -242,6 +251,7 @@ test("a malicious remote mode of 0777 is still reduced to 0700", async () => {
     node: "node-1",
     remotePath: path.join(nodeRoot, "tool.sh"),
     localPath: target,
+    workspaceRoot: gatewayRoot,
     signal: undefined,
     progress: undefined,
   });
@@ -259,6 +269,7 @@ test("a non-executable remote artifact stays 0600", async () => {
     node: "node-1",
     remotePath: source,
     localPath: target,
+    workspaceRoot: gatewayRoot,
     signal: undefined,
     progress: undefined,
   });
@@ -273,6 +284,7 @@ test("status reports verified content and drift after modification", async () =>
   await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: gatewayRoot,
+    workspaceRoot: gatewayRoot,
     remotePath,
     exclude: undefined,
     signal: undefined,
@@ -347,6 +359,7 @@ test("a stalled artifact transfer stops at the absolute deadline", async () => {
         node: "node-1",
         remotePath: "/srv/x",
         localPath: path.join(gatewayRoot, "x"),
+        workspaceRoot: gatewayRoot,
         signal: undefined,
         progress: undefined,
       }),

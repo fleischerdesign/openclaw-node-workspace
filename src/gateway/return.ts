@@ -8,7 +8,7 @@ import type { GatewayConfig } from "../config.js";
 import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { scanWorkspace } from "../manifest.js";
-import { RETURN_STATE_FILE, isWithin, normalizeAbsolutePosixPath } from "../paths.js";
+import { RETURN_STATE_FILE, normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_RETURN, PROTOCOL_VERSION } from "../protocol.js";
 import { fsyncDirectory } from "../node/fs-atomic.js";
 import {
@@ -21,6 +21,7 @@ import {
 import { buildReturnPlan, assertPlanApplicable, type ReturnPlan, type ReturnOperation } from "../return-plan.js";
 import { readNodeTree, type NodeTreeOutcome } from "./tree.js";
 import { readReturnState, writeReturnState } from "./return-state.js";
+import { assertLocalAccess, resolveWorkspaceBoundary, type WorkspaceBoundary } from "./workspace-boundary.js";
 
 /** The report shows at most this many operations; a larger plan is refused. */
 export const MAX_RETURN_OPERATIONS = 200;
@@ -29,6 +30,8 @@ export interface ReturnPreviewInput {
   readonly node: string;
   readonly remotePath: string;
   readonly localPath: string;
+  /** Workspace directory the host resolved for this session; absent fails closed. */
+  readonly workspaceRoot: string | undefined;
   readonly include: readonly string[] | undefined;
   readonly exclude: readonly string[] | undefined;
   readonly signal: AbortSignal | undefined;
@@ -67,37 +70,18 @@ export interface ReturnOutcome {
   readonly durationMs: number;
 }
 
-async function realRoots(roots: readonly string[]): Promise<string[]> {
-  const resolved: string[] = [];
-  for (const root of roots) {
-    try {
-      const real = await fs.realpath(root);
-      const stat = await fs.lstat(real);
-      if (stat.isDirectory()) resolved.push(real);
-    } catch {
-      // A configured root that does not exist grants nothing.
-    }
-  }
-  return resolved;
-}
-
 /**
  * Resolve the local project directory a return may write into.
  *
- * The target must already exist as a real directory inside a configured
- * `gateway.returnRoots` entry. The plugin never creates the project root
- * itself, so a typo cannot invent a tree outside the operator's intent.
+ * The target must already exist as a real directory inside the session
+ * workspace. The plugin never creates the project root itself, so a typo
+ * cannot invent a tree outside the host's delegated authority.
  */
 async function resolveLocalTarget(
   localPath: string,
   config: GatewayConfig,
+  boundary: WorkspaceBoundary,
 ): Promise<{ directory: string; root: string }> {
-  if (config.returnRoots.length === 0) {
-    throw new NodeWorkspaceError(
-      "config-invalid",
-      "gateway.returnRoots is empty; configure at least one absolute directory before returning a project tree",
-    );
-  }
   const normalized = normalizeAbsolutePosixPath(localPath);
   let stat;
   try {
@@ -115,15 +99,8 @@ async function resolveLocalTarget(
     throw new NodeWorkspaceError("not-a-directory", `local target is not a directory: ${normalized}`);
   }
   const real = await fs.realpath(normalized);
-  const roots = await realRoots(config.returnRoots);
-  const match = roots.find((root) => isWithin(root, real));
-  if (match === undefined) {
-    throw new NodeWorkspaceError(
-      "path-outside-root",
-      `local target ${real} is outside every configured gateway.returnRoots entry`,
-    );
-  }
-  return { directory: real, root: match };
+  await assertLocalAccess(boundary, real, "local target", config.returnRoots, "gateway.returnRoots");
+  return { directory: real, root: boundary.root };
 }
 
 async function digestFile(absolutePath: string): Promise<string> {
@@ -146,7 +123,8 @@ export async function previewReturn(
   input: ReturnPreviewInput,
 ): Promise<ReturnPreview> {
   const nodeId = await resolveNodeId(transport, input.node);
-  const local = await resolveLocalTarget(input.localPath, config);
+  const boundary = await resolveWorkspaceBoundary(input.workspaceRoot, "preview a return");
+  const local = await resolveLocalTarget(input.localPath, config, boundary);
   const remotePath = normalizeAbsolutePosixPath(input.remotePath);
   const nodeExclude = [...config.exclude, ...(input.exclude ?? []), RETURN_STATE_FILE];
   const tree = await readNodeTree(transport, config, {

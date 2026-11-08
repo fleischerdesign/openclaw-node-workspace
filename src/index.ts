@@ -7,6 +7,7 @@ import { ProgressEventCoalescer } from "./gateway/progress-events.js";
 import { TransferProgressStore, type TransferScope } from "./gateway/progress-store.js";
 import { createNodeTransport } from "./gateway/transport.js";
 import { createTools } from "./gateway/tools.js";
+import { resolveToolWorkspace } from "./gateway/workspace-root.js";
 import { createNodeCommands } from "./node/commands.js";
 import {
   COMMAND_FETCH,
@@ -104,18 +105,28 @@ export default definePluginEntry({
       },
     });
 
-    api.registerTool((context?: { sessionKey?: string; agentId?: string }) => {
+    api.registerTool((context) => {
       const scope: TransferScope | undefined = context?.sessionKey
         ? {
             sessionKey: context.sessionKey,
             ...(context.agentId ? { agentId: context.agentId } : {}),
           }
         : undefined;
+      // The workspace comes from the host: the session's effective workspace
+      // first, the agent workspace only as the documented fallback. The plugin
+      // never guesses, so a missing workspace fails closed at the first path check.
+      const workspace = resolveToolWorkspace({
+        context,
+        resolveAgentWorkspaceDir: api.runtime.agent?.resolveAgentWorkspaceDir,
+        currentConfig: () => api.runtime.config.current({ clone: true }),
+      });
       return createTools({
         transport,
         config: gateway.config,
         configError: gateway.error,
         ...(scope ? { scope } : {}),
+        ...(workspace.workspaceDir !== undefined ? { workspaceDir: workspace.workspaceDir } : {}),
+        ...(workspace.workspaceError !== undefined ? { workspaceError: workspace.workspaceError } : {}),
         progress,
         onProgressChange: notify,
       });

@@ -61,6 +61,7 @@ test("push publishes a verified one-way copy and reports the remote cwd", async 
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "Node One",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -92,6 +93,7 @@ test("published modes are owner-only, with the executable bit preserved", async 
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -108,6 +110,7 @@ test("a repeated identical push is reported as already applied", async () => {
   const input = {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -126,6 +129,7 @@ test("a changed workspace at an occupied destination is a conflict, never a repl
   const base = {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath,
     exclude: undefined,
     signal: undefined,
@@ -147,6 +151,7 @@ test("an unchanged marker with modified node content is drift, not already-appli
   const input = {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath,
     exclude: undefined,
     signal: undefined,
@@ -171,6 +176,7 @@ test("a foreign directory is never replaced or deleted", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath,
         exclude: undefined,
         signal: undefined,
@@ -189,6 +195,7 @@ test("a destination outside the node roots is rejected before anything is writte
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(outside, "app"),
         exclude: undefined,
         signal: undefined,
@@ -208,6 +215,7 @@ test("a symlinked parent cannot escape a node push root", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(destinationRoot, "link", "app"),
         exclude: undefined,
         signal: undefined,
@@ -234,6 +242,7 @@ test("transport loss after acceptance is an explicit unknown outcome, not a fail
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
         exclude: undefined,
         signal: undefined,
@@ -269,6 +278,7 @@ test("a tampered file is rejected and leaves only an incomplete marker", async (
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
         exclude: undefined,
         signal: undefined,
@@ -291,6 +301,7 @@ test("an empty destination created before the push is never replaced", async () 
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath,
         exclude: undefined,
         signal: undefined,
@@ -301,8 +312,8 @@ test("an empty destination created before the push is never replaced", async () 
   assert.deepEqual(await fs.readdir(remotePath), []);
 });
 
-test("a local path outside gateway.localRoots is never scanned", async () => {
-  const { config, harness } = await setup({ "a.txt": "alpha" });
+test("a local path outside the session workspace is never scanned", async () => {
+  const { sourceRoot, config, harness } = await setup({ "a.txt": "alpha" });
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-local-out-"));
   await fs.writeFile(path.join(outside, "secret.txt"), "secret");
   await assert.rejects(
@@ -310,6 +321,7 @@ test("a local path outside gateway.localRoots is never scanned", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: outside,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(outside, "copy"),
         exclude: undefined,
         signal: undefined,
@@ -329,6 +341,7 @@ test("a symlinked destination is rejected, not replaced", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
         exclude: undefined,
         signal: undefined,
@@ -351,6 +364,7 @@ test("a foreign marker is never treated as ownership", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath,
         exclude: undefined,
         signal: undefined,
@@ -381,6 +395,7 @@ test("a stale staging directory never blocks a retry or a first attempt", async 
   const input = {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath,
     exclude: undefined,
     signal: undefined,
@@ -405,6 +420,7 @@ test("a root of / matches its children instead of failing on a // prefix", async
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -426,6 +442,7 @@ test("skipped symlinks are returned, not silently dropped", async () => {
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -460,6 +477,7 @@ test("a published-but-failed node result is an unknown outcome", async () => {
       pushWorkspace(harness.transport, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath: path.join(destinationRoot, "app"),
         exclude: undefined,
         signal: undefined,
@@ -495,6 +513,7 @@ test("a stale staging directory does not block a first publish", async () => {
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     exclude: undefined,
     signal: undefined,
@@ -510,6 +529,7 @@ test("a legacy marker without state or manifest is verifiable against the incomi
   const input = {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath,
     exclude: undefined,
     signal: undefined,
@@ -560,6 +580,7 @@ test("a parent fsync failure before the complete marker leaves an incomplete pub
         pushWorkspace(harness.transport, config.gateway, {
           node: "node-1",
           localPath: sourceRoot,
+          workspaceRoot: sourceRoot,
           remotePath: path.join(destinationRoot, "app"),
           exclude: undefined,
           signal: undefined,
@@ -633,6 +654,7 @@ test("a subdirectory swapped to a symlink before a file write is rejected", asyn
       pushWorkspace(racing, config.gateway, {
         node: "node-1",
         localPath: sourceRoot,
+        workspaceRoot: sourceRoot,
         remotePath,
         exclude: undefined,
         signal: undefined,
@@ -687,6 +709,7 @@ test("a publish acknowledges files in bounded batches", async () => {
   const outcome = await pushWorkspace(harness.transport, config.gateway, {
     node: "node-1",
     localPath: sourceRoot,
+    workspaceRoot: sourceRoot,
     remotePath: path.join(destinationRoot, "app"),
     incrementalFrom: undefined,
     exclude: undefined,
@@ -738,6 +761,7 @@ test("a batch failure names the failing file and never reports success", async (
     pushWorkspace(harness.transport, config.gateway, {
       node: "node-1",
       localPath: sourceRoot,
+      workspaceRoot: sourceRoot,
       remotePath,
       incrementalFrom: undefined,
       exclude: undefined,
@@ -767,6 +791,7 @@ test("a file fsync failure happens before the complete marker", async () => {
         pushWorkspace(harness.transport, config.gateway, {
           node: "node-1",
           localPath: sourceRoot,
+          workspaceRoot: sourceRoot,
           remotePath: path.join(destinationRoot, "app"),
           exclude: undefined,
           signal: undefined,

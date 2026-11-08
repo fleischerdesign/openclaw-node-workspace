@@ -110,21 +110,23 @@ npm pack --pack-destination "$WORK" >/dev/null
 TARBALL="$(ls "$WORK"/*.tgz)"
 
 mkdir -p "$WORK/gateway/home" "$WORK/gateway/state" "$WORK/node/home" "$WORK/node/state"
-mkdir -p "$WORK/node-root/pushed" "$WORK/gateway-root/src" "$WORK/gateway-root/artifacts"
-printf 'hello from the gateway workspace\n' > "$WORK/gateway-root/src/hello.txt"
+GW_WORKSPACE="$WORK/gateway/state/workspace"
+GW_ROOT="$GW_WORKSPACE/gateway-root"
+mkdir -p "$WORK/node-root/pushed" "$GW_ROOT/src" "$GW_ROOT/artifacts"
+printf 'hello from the gateway workspace\n' > "$GW_ROOT/src/hello.txt"
 printf 'artifact from the node\n' > "$WORK/node-root/pushed/result.txt"
 
 # A small but non-trivial tree: nested directories, an empty directory, an
 # empty file, binary bytes including NUL, and an executable bit. Every property
 # is checked on the node side after the cross-process push.
-mkdir -p "$WORK/gateway-root/src/nested/deep" "$WORK/gateway-root/src/empty-dir"
-printf 'nested file\n' > "$WORK/gateway-root/src/nested/deep/notes.md"
-printf 'a file that stays in place\n' > "$WORK/gateway-root/src/remove-me.txt"
-printf '#!/bin/sh\necho run\n' > "$WORK/gateway-root/src/run.sh"
-chmod 0755 "$WORK/gateway-root/src/run.sh"
-: > "$WORK/gateway-root/src/empty.txt"
+mkdir -p "$GW_ROOT/src/nested/deep" "$GW_ROOT/src/empty-dir"
+printf 'nested file\n' > "$GW_ROOT/src/nested/deep/notes.md"
+printf 'a file that stays in place\n' > "$GW_ROOT/src/remove-me.txt"
+printf '#!/bin/sh\necho run\n' > "$GW_ROOT/src/run.sh"
+chmod 0755 "$GW_ROOT/src/run.sh"
+: > "$GW_ROOT/src/empty.txt"
 node -e 'const fs=require("node:fs");const b=Buffer.alloc(4096);for(let i=0;i<b.length;i+=1)b[i]=(i*37+11)&255;fs.writeFileSync(process.argv[1],b)' \
-  "$WORK/gateway-root/src/blob.bin"
+  "$GW_ROOT/src/blob.bin"
 
 # The child environment is built by an executable helper so the daemons can be
 # started with `setsid` and still be killed as one owned process group.
@@ -189,9 +191,9 @@ const gateway = {
       "node-workspace": {
         config: {
           gateway: {
-            localRoots: [path.join(work, "gateway-root", "src")],
-            artifactRoots: [path.join(work, "gateway-root", "artifacts")],
-            returnRoots: [path.join(work, "gateway-root", "src")],
+            localRoots: [path.join(work, "gateway", "state", "workspace", "gateway-root", "src")],
+            artifactRoots: [path.join(work, "gateway", "state", "workspace", "gateway-root", "artifacts")],
+            returnRoots: [path.join(work, "gateway", "state", "workspace", "gateway-root", "src")],
           },
         },
       },
@@ -285,7 +287,7 @@ echo "PASS: isolated Gateway + node host answered nodews.status"
 
 REMOTE_APP="$WORK/node-root/app"
 PUSH1_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:"integration-node",localPath:process.argv[1],remotePath:process.argv[2]}))' \
-  "$WORK/gateway-root/src" "$REMOTE_APP")"
+  "$GW_ROOT/src" "$REMOTE_APP")"
 
 stage "publish through the plugin tool: tools.invoke -> openDuplex -> nodews.push"
 tool_call node_workspace_push "$PUSH1_ARGS" "$WORK/tool-push1.json"
@@ -324,7 +326,7 @@ function scan(root, base = root, entries = new Map()) {
   return entries;
 }
 
-const source = scan(path.join(work, "gateway-root", "src"));
+const source = scan(path.join(work, "gateway", "state", "workspace", "gateway-root", "src"));
 const destination = scan(path.join(work, "node-root", "app"));
 for (const [name, value] of source) {
   if (destination.get(name) !== value) throw new Error(`node side differs for ${name}: ${String(destination.get(name))} != ${value}`);
@@ -340,9 +342,9 @@ console.log(`published tree matches the source: ${details.files} files, digest $
 NODE
 
 stage "refuse to mutate an existing destination through the plugin tool"
-printf 'added after publication\n' > "$WORK/gateway-root/src/second.txt"
+printf 'added after publication\n' > "$GW_ROOT/src/second.txt"
 PUSH_AGAIN_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:"integration-node",localPath:process.argv[1],remotePath:process.argv[2]}))' \
-  "$WORK/gateway-root/src" "$REMOTE_APP")"
+  "$GW_ROOT/src" "$REMOTE_APP")"
 tool_call node_workspace_push "$PUSH_AGAIN_ARGS" "$WORK/tool-push-again.json"
 cat "$WORK/tool-push-again.json"
 
@@ -368,7 +370,7 @@ console.log("coded refusal reached the tool result and the destination stayed un
 NODE
 
 stage "fetch an artifact through the plugin tool: tools.invoke -> openDuplex -> nodews.fetch"
-ARTIFACT_LOCAL="$WORK/gateway-root/artifacts/result.txt"
+ARTIFACT_LOCAL="$GW_ROOT/artifacts/result.txt"
 ARTIFACT_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:process.argv[1],remotePath:process.argv[2],localPath:process.argv[3]}))' \
   "$NODE_ID" "$WORK/node-root/pushed/result.txt" "$ARTIFACT_LOCAL")"
 [[ ! -e "$ARTIFACT_LOCAL" ]] || { echo "FAIL: artifact destination existed before the call" >&2; exit 1; }
@@ -384,7 +386,7 @@ const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (report.ok !== true) throw new Error(`artifact tool failed: ${JSON.stringify(report.error ?? report)}`);
 if (report.source !== "plugin") throw new Error(`artifact fetch was not served by the plugin: ${String(report.source)}`);
 const details = report.output?.details;
-const local = path.join(work, "gateway-root", "artifacts", "result.txt");
+const local = path.join(work, "gateway", "state", "workspace", "gateway-root", "artifacts", "result.txt");
 const bytes = fs.readFileSync(local);
 const source = fs.readFileSync(path.join(work, "node-root", "pushed", "result.txt"));
 if (!bytes.equals(source)) throw new Error("fetched bytes differ from the node source");
@@ -407,7 +409,7 @@ if (report.ok !== true) throw new Error(`tools.invoke failed instead of returnin
 const details = report.output?.details;
 if (details?.ok !== false) throw new Error("a second fetch to the same destination unexpectedly succeeded");
 if (details?.code !== "destination-exists") throw new Error(`unexpected coded refusal: ${String(details?.code)}`);
-const artifactDir = path.join(process.argv[3], "gateway-root", "artifacts");
+const artifactDir = path.join(process.argv[3], "gateway", "state", "workspace", "gateway-root", "artifacts");
 const names = fs.readdirSync(artifactDir).sort();
 if (names.join(",") !== "result.txt") throw new Error(`artifact directory contains leftovers: ${names.join(", ")}`);
 if (fs.readFileSync(path.join(artifactDir, "result.txt"), "utf8") !== "artifact from the node\n") {
@@ -441,7 +443,7 @@ NODE
 stage "preview and return a generated project file through the plugin tools"
 printf 'generated on the node\n' > "$REMOTE_APP/generated.txt"
 CHANGES_ARGS="$(node -e 'process.stdout.write(JSON.stringify({node:process.argv[1],remotePath:process.argv[2],localPath:process.argv[3]}))' \
-  "$NODE_ID" "$REMOTE_APP" "$WORK/gateway-root/src")"
+  "$NODE_ID" "$REMOTE_APP" "$GW_ROOT/src")"
 tool_call node_workspace_changes "$CHANGES_ARGS" "$WORK/tool-changes.json"
 cat "$WORK/tool-changes.json"
 
@@ -460,7 +462,7 @@ console.log("preview reports the generated addition without writing");
 NODE
 
 RETURN_ARGS="$(node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(JSON.stringify({node:process.argv[2],remotePath:process.argv[3],localPath:process.argv[4],planDigest:j.output.details.planDigest}))' \
-  "$WORK/tool-changes.json" "$NODE_ID" "$REMOTE_APP" "$WORK/gateway-root/src")"
+  "$WORK/tool-changes.json" "$NODE_ID" "$REMOTE_APP" "$GW_ROOT/src")"
 tool_call node_workspace_return "$RETURN_ARGS" "$WORK/tool-return.json"
 cat "$WORK/tool-return.json"
 
@@ -473,7 +475,7 @@ const details = report.output?.details;
 if (details?.applied?.length !== 1 || details.applied[0]?.path !== "generated.txt") {
   throw new Error(`unexpected applied set: ${JSON.stringify(details?.applied)}`);
 }
-const local = path.join(process.argv[3], "gateway-root", "src", "generated.txt");
+const local = path.join(process.argv[3], "gateway", "state", "workspace", "gateway-root", "src", "generated.txt");
 if (fs.readFileSync(local, "utf8") !== "generated on the node\n") throw new Error("returned bytes differ");
 if ((fs.statSync(local).mode & 0o077) !== 0) throw new Error("returned file has group/other permissions");
 console.log("generated file returned through the real Gateway/node boundary");
