@@ -2,8 +2,9 @@
   "name": "@fleischerdesign/openclaw-node-workspace",
   "version": "0.1.0",
   "description": "Publish an explicitly selected workspace from an OpenClaw Gateway to a paired node, and retrieve selected artifacts back.",
-  "type": "module",
+  "license": "Apache-2.0",
   "private": true,
+  "type": "module",
   "engines": {
     "node": ">=24.16"
   },
@@ -11,6 +12,7 @@
     "dist",
     "openclaw.plugin.json",
     "README.md",
+    "LICENSE",
     "LICENSING.md",
     "docs"
   ],

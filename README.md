@@ -53,8 +53,8 @@ See [Security](docs/security.md) for the precise claims and the remaining risks.
 
 ## Install
 
-The package is private and has no license yet (see [Licensing](LICENSING.md)), so it is not
-published to npm or ClawHub. Build a tarball and install that:
+The package is licensed under Apache-2.0 (see [Licensing](LICENSING.md)) but marked private, so it is
+not published to npm or ClawHub. Build a tarball and install that:
 
 ```bash
 npm ci
@@ -315,9 +315,11 @@ stub is a test double for the model, not a model.
 - [Security](docs/security.md) — threat model, non-goals, and residual risks.
 - [Operations](docs/operations.md) — setup, reconciliation, and troubleshooting.
 - [Verification](docs/verification.md) — what was actually run and what remains unproven.
-- [Licensing](LICENSING.md) — an open decision, not a chosen license.
+- [Licensing](LICENSING.md) — Apache-2.0, why that license, and what it grants.
 
 ## Licensing
 
-**No license has been chosen.** The package is marked private and no permission is granted until
-the repository owner selects a license. Contributions are not accepted. See [LICENSING.md](LICENSING.md).
+**Apache-2.0.** Use, modification and redistribution are permitted under its terms, including inside a
+fleet configuration licensed differently; the patent grant and warranty disclaimer travel with any
+copy. Contributions are accepted under the same license. The package stays private and is not
+published to a registry. See [LICENSING.md](LICENSING.md).

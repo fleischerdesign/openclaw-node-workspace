@@ -8,5 +8,5 @@
 | [Operations](operations.md) | Install order, configuration, reconciliation, upgrades, and removal. |
 | [Verification](verification.md) | Reproducible checks and the evidence produced by the last run. |
 
-The top-level [README](../README.md) is the user-facing entry point. The licensing decision is in
-[LICENSING.md](../LICENSING.md) and is deliberately open.
+The top-level [README](../README.md) is the user-facing entry point. The license is Apache-2.0; the
+reasoning and what it grants are in [LICENSING.md](../LICENSING.md).

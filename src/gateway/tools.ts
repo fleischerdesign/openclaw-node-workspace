@@ -496,6 +496,12 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           deps.onProgressChange?.(true);
           const mib = (outcome.bytes / (1024 * 1024)).toFixed(2);
           const verb = outcome.status === "already-applied" ? "already present" : "published";
+          // Without the reuse counts a caller cannot tell whether the incremental
+          // path did anything: the totals look the same as a full copy.
+          const reuseNote =
+            outcome.reusedFiles === 0
+              ? ""
+              : ` ${outcome.reusedFiles} file(s) reused from the base (${(outcome.reusedBytes / (1024 * 1024)).toFixed(2)} MiB), ${(outcome.transferredBytes / (1024 * 1024)).toFixed(2)} MiB transferred.`;
           const skippedNote =
             outcome.skipped.length === 0
               ? ""
@@ -507,6 +513,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                 text:
                   `${verb}: ${outcome.files} files (${mib} MiB) at ${outcome.cwd} on node ${outcome.nodeId}. ` +
                   `sha256 tree digest ${outcome.digest}. ` +
+                  reuseNote +
                   `One-way copy; later Gateway changes are not synchronized. ` +
                   (outcome.stateRecorded ? "A local return baseline was recorded." : "No local return baseline was recorded; the first return may report conflicts.") +
                   skippedNote +

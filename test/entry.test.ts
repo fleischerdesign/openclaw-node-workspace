@@ -140,6 +140,21 @@ test("the registered push tool publishes through the injected runtime and return
   assert.match(result.content[0]?.text ?? "", /host=node/);
   assert.equal(await fs.readFile(path.join(remotePath, "a.txt"), "utf8"), "alpha");
 
+  // An unchanged incremental publish reuses the whole base; the text has to say
+  // so, otherwise the caller cannot tell the delta path from a full copy.
+  const incrementalPath = path.join(destination, "app-incremental");
+  const incremental = await pushTool.execute("call-incremental", {
+    node: "node-1",
+    localPath: source,
+    remotePath: incrementalPath,
+    incrementalFrom: remotePath,
+  });
+  assert.equal(incremental.details.ok, true);
+  assert.equal(incremental.details.transferredBytes, 0);
+  assert.ok(Number(incremental.details.reusedFiles) > 0);
+  assert.match(incremental.content[0]?.text ?? "", /reused from the base/);
+  assert.match(incremental.content[0]?.text ?? "", /0\.00 MiB transferred/);
+
   await fs.writeFile(path.join(source, "a.txt"), "changed");
   const conflict = await pushTool.execute("conflict", { node: "node-1", localPath: source, remotePath });
   assert.equal(conflict.details.ok, false);
