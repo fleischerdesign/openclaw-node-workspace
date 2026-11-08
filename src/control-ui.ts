@@ -83,8 +83,14 @@ export default defineControlUiPlugin({
           }
           const transfers = visibleTransfers(last?.transfers ?? [], Date.now());
           if (transfers.length === 0) {
+            // An empty board cell reads as a broken widget. Say that nothing is
+            // running instead of rendering nothing at all.
             root.replaceChildren();
-            root.style.display = "none";
+            const idle = document.createElement("span");
+            idle.textContent = "No transfer in this session";
+            idle.style.cssText = "font:inherit;font-size:11px;opacity:.7;";
+            root.append(idle);
+            root.style.display = "flex";
             return;
           }
           root.replaceChildren();
