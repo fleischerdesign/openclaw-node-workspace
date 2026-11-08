@@ -153,7 +153,7 @@ test("the registered push tool publishes through the injected runtime and return
   assert.equal(incremental.details.transferredBytes, 0);
   assert.ok(Number(incremental.details.reusedFiles) > 0);
   assert.match(incremental.content[0]?.text ?? "", /reused from the base/);
-  assert.match(incremental.content[0]?.text ?? "", /0\.00 MiB transferred/);
+  assert.match(incremental.content[0]?.text ?? "", /0\.00 MiB transferred\. One-way copy/);
 
   await fs.writeFile(path.join(source, "a.txt"), "changed");
   const conflict = await pushTool.execute("conflict", { node: "node-1", localPath: source, remotePath });

@@ -501,7 +501,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           const reuseNote =
             outcome.reusedFiles === 0
               ? ""
-              : ` ${outcome.reusedFiles} file(s) reused from the base (${(outcome.reusedBytes / (1024 * 1024)).toFixed(2)} MiB), ${(outcome.transferredBytes / (1024 * 1024)).toFixed(2)} MiB transferred.`;
+              : ` ${outcome.reusedFiles} file(s) reused from the base (${(outcome.reusedBytes / (1024 * 1024)).toFixed(2)} MiB), ${(outcome.transferredBytes / (1024 * 1024)).toFixed(2)} MiB transferred. `;
           const skippedNote =
             outcome.skipped.length === 0
               ? ""
