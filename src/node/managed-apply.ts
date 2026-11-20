@@ -274,6 +274,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
   if (options.previous !== undefined) {
     await writeRecord(options.paths.stateDir, workspaceKey(options.plan.remotePath), {
       ...options.previous,
+      receipts: boundReceipts(options.previous.receipts, nowMs(), options.lock.operationId),
       readiness: "applying",
       updatedAt: nowIso(),
     });
@@ -768,7 +769,12 @@ export async function recoverTransaction(
   if (journal.phase === "prepared") {
     await cleanupTransaction(paths);
     if (record !== undefined) {
-      await writeRecord(paths.stateDir, key, { ...record, readiness: "ready", updatedAt: nowIso() });
+      await writeRecord(paths.stateDir, key, {
+        ...record,
+        receipts: boundReceipts(record.receipts, nowMs(), journal.operationId),
+        readiness: "ready",
+        updatedAt: nowIso(),
+      });
     }
     return { status: "recovered", operationId: journal.operationId };
   }

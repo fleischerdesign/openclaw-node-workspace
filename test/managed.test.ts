@@ -1066,6 +1066,12 @@ test("a rebind crash after the commit journal restores the new binding without a
   const recordFile = path.join(f.nodeRoot, ".nodews-state", "workspaces", `${key}.json`);
   await fs.rm(recordFile, { force: true });
 
+  // The old binding is no longer authorized after the committed rebind, but the
+  // same owner may recover the committed state and then rebind explicitly.
+  await assert.rejects(
+    () => f.sync({ mode: "preview", create: false, policy: {}, ownerAgent: "main" }),
+    isCode("workspace-forbidden"),
+  );
   const recovered = await f.sync({
     localPath: other,
     mode: "preview",

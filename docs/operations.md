@@ -95,7 +95,7 @@ before syncing if they may write source files.
 
 Automatic dead-lock reclamation is disabled because POSIX has no compare-and-delete primitive; a
 read-then-rename can delete a newly created live lock. When status or an error names a dead pid and
-token, stop the node host, then run `scripts/lock-maintenance.mjs` with `--quiescent --yes` and that
+token, stop the node host, then run `node scripts/lock-maintenance.mjs` with `--quiescent --yes` and that
 exact `--token`/`--pid` (dead readable lock) or that exact `--sha256` (unreadable lock). It refuses a
 live process, a changed/replaced lock and missing confirmation. Never delete a lock file by path from
 a running system.

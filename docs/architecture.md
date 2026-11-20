@@ -92,7 +92,7 @@ window during a backup-first replacement, and native `exec` does not participate
 
 One lock per workspace. A live owner always blocks, regardless of age. An unreadable lock blocks. A
 lock whose recorded process is provably dead also blocks: POSIX offers no compare-and-delete, so
-automatic reclamation could remove a live replacement created between the read and the unlink. The error names the inspected pid/token; release is `scripts/lock-maintenance.mjs` on a stopped node,
+automatic reclamation could remove a live replacement created between the read and the unlink. The error names the inspected pid/token; release is `node scripts/lock-maintenance.mjs` on a stopped node,
 with the exact token/pid or exact sha256 and `--quiescent --yes`, and refuses a live or replaced lock.
 Lock bodies are published with a fsynced temp file plus `link(2)` so a crash cannot leave a partial
 lock at the final name. Each mutation phase

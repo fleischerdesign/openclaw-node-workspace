@@ -244,6 +244,32 @@ test("the tool factory falls back to the agent workspace when the session provid
   assert.equal(resolverCalls, 1);
 });
 
+test("managed tools fail closed when the host supplies no agent identity", async () => {
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-entry-noagent-"));
+  await fs.writeFile(path.join(source, "a.txt"), "alpha");
+  const raw = { gateway: { timeoutMs: 20_000 }, node: { pushRoots: [source] } };
+  const { createTools } = await import("../src/gateway/tools.js");
+  const tools = createTools({
+    transport: createHarness(createNodeCommands(raw).commands).transport,
+    config: (await import("../src/config.js")).resolvePluginConfig(raw).gateway,
+    configError: undefined,
+    workspaceDir: source,
+  });
+  const syncTool = tools.find((tool) => tool.name === "node_workspace_sync");
+  const statusTool = tools.find((tool) => tool.name === "node_workspace_status");
+  assert.ok(syncTool && statusTool);
+  const syncResult = await syncTool.execute("no-agent", {
+    node: "node-1",
+    localPath: source,
+    remotePath: path.join(source, "app"),
+    mode: "preview",
+    create: true,
+  });
+  assert.equal(syncResult.details.code, "identity-unresolved");
+  const statusResult = await statusTool.execute("no-agent", { node: "node-1", remotePath: path.join(source, "app") });
+  assert.equal(statusResult.details.code, "identity-unresolved");
+});
+
 test("toolFailure preserves unknown-outcome as an actionable tool result", async () => {
   const { toolFailure } = await import("../src/gateway/tools.js");
   const { NodeWorkspaceError } = await import("../src/errors.js");
