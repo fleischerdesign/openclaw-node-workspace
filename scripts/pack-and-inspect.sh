@@ -21,6 +21,12 @@ npm run build >/dev/null
 npm pack --pack-destination "$WORK" >/dev/null
 TARBALL="$(ls "$WORK"/*.tgz)"
 
+echo "== package contents"
+tar -tzf "$TARBALL" | grep -qx 'package/scripts/lock-maintenance.mjs' || {
+  echo "FAIL: package does not contain scripts/lock-maintenance.mjs" >&2
+  exit 1
+}
+
 run_isolated() {
   env \
     HOME="$PROFILE/home" \
@@ -37,6 +43,24 @@ echo "== install $(basename "$TARBALL")"
 run_isolated openclaw plugins install "npm-pack:$TARBALL" --force --accept-capabilities 2>&1 | tee "$WORK/install.log"
 grep -q "OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE" "$WORK/install.log" && {
   echo "FAIL: install was refused by Nix mode" >&2
+  exit 1
+}
+
+echo "== installed operator maintenance script"
+MAINTENANCE="$(find "$PROFILE/state/npm/projects" -path '*/scripts/lock-maintenance.mjs' -print -quit)"
+[[ -n "$MAINTENANCE" ]] || {
+  echo "FAIL: installed package does not contain scripts/lock-maintenance.mjs" >&2
+  exit 1
+}
+node "$MAINTENANCE" --help >"$WORK/maintenance-help.txt" 2>&1
+grep -q -- "--quiescent --yes" "$WORK/maintenance-help.txt"
+if node "$MAINTENANCE" --state-dir "$WORK/never-created" --key "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" >"$WORK/maintenance-refuse.txt" 2>&1; then
+  echo "FAIL: maintenance ran without quiescence/confirmation" >&2
+  exit 1
+fi
+grep -q -- "--quiescent is required" "$WORK/maintenance-refuse.txt"
+[[ ! -e "$WORK/never-created" ]] || {
+  echo "FAIL: refused maintenance touched a state directory" >&2
   exit 1
 }
 

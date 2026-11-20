@@ -98,7 +98,7 @@ export function assertReceiptQuota(
   if (committed >= quota || bytes >= RECEIPT_MAX_BYTES) {
     throw new NodeWorkspaceError(
       "receipt-quota-exceeded",
-      `the workspace holds ${committed} unexpired committed receipts (${bytes} bytes); wait for expiry or run the documented maintenance instead of evicting live receipts`,
+      `the workspace holds ${committed} unexpired committed receipts (${bytes} bytes); wait for expiry instead of evicting live receipts. This quota does not remove or recover a workspace lock.`,
     );
   }
 }

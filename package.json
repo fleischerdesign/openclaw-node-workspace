@@ -14,7 +14,8 @@
     "README.md",
     "LICENSE",
     "LICENSING.md",
-    "docs"
+    "docs",
+    "scripts/lock-maintenance.mjs"
   ],
   "dependencies": {
     "minimatch": "10.2.6",

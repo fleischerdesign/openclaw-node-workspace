@@ -118,7 +118,9 @@ The managed protocol is version 5. Managed and old generation tools do not share
 format; install the same package on both sides before creating a managed workspace. There is no
 migration of an old immutable generation in this release: adopt the source as a new managed workspace
 with a preview, or create the managed workspace from the local tree and leave the old directory in
-place.
+place. A journal written by an unknown/older version, or otherwise malformed, fails closed as
+`recovery-blocked`: inspect the affected paths and use the documented quiescent-node recovery; never
+force-rewrite or delete it.
 
 ## Troubleshooting
 

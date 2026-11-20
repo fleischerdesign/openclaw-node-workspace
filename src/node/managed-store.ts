@@ -529,6 +529,7 @@ export async function acquireLock(
   };
   const temp = path.join(directory, `.lock-${randomUUID()}.tmp`);
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let linked = false;
   try {
     handle = await fs.open(temp, "wx", 0o600);
     await writeAllBytes(handle, Buffer.from(`${JSON.stringify(body)}\n`, "utf8"));
@@ -541,9 +542,39 @@ export async function acquireLock(
     // link(2) publishes the complete, fsynced body atomically; the final name
     // never exists with an empty or partial body.
     await fs.link(temp, file);
+    linked = true;
+    if (process.env.NODE_WORKSPACE_TEST_FAIL_LOCK === "after-link") {
+      throw Object.assign(new Error("injected failure after lock link"), { code: "ENOSPC" });
+    }
     await fsyncDirectory(directory);
     return { file, token: body.token, operationId };
   } catch (error) {
+    if (linked) {
+      const current = await readLock(file);
+      if (current !== undefined && current.token === body.token && current.pid === process.pid) {
+        const removed = await fs.rm(file, { force: true }).then(() => true, () => false);
+        if (removed) {
+          throw new NodeWorkspaceError(
+            "io",
+            `cannot publish the workspace lock durably; the owned lock was removed: ${errorMessage(error)}`,
+            {},
+            { cause: error },
+          );
+        }
+        throw new NodeWorkspaceError(
+          "io",
+          `cannot publish the workspace lock durably and could not remove the owned lock; inspect it with the operator maintenance script: ${errorMessage(error)}`,
+          {},
+          { cause: error },
+        );
+      }
+      throw new NodeWorkspaceError(
+        "io",
+        `cannot publish the workspace lock durably; a lock that is not provably ours remains; inspect it with the operator maintenance script: ${errorMessage(error)}`,
+        {},
+        { cause: error },
+      );
+    }
     const existing = await readLock(file);
     if (existing !== undefined && !isErrno(error, "EEXIST")) {
       // The link failed for a reason other than a competing lock; surface it.

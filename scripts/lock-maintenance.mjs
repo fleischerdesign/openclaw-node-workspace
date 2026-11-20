@@ -20,6 +20,14 @@ function usage(message) {
   process.exit(2);
 }
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(
+    "usage: node scripts/lock-maintenance.mjs --state-dir <dir> --key <key> --quiescent --yes\n" +
+      "         (--token <token> --pid <pid> | --sha256 <hex>)",
+  );
+  process.exit(0);
+}
+
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
   const token = process.argv[index];

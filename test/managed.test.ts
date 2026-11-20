@@ -1234,14 +1234,16 @@ test("lock publication failure leaves no partial lock and a retry succeeds", asy
   const stateDir = path.join(f.nodeRoot, ".nodews-state");
   const store = await import("../src/node/managed-store.js");
   const lockFile = path.join(stateDir, "locks", `${store.workspaceKey(f.remotePath)}.lock`);
-  process.env.NODE_WORKSPACE_TEST_FAIL_LOCK = "before-link";
-  try {
-    await assert.rejects(() => f.sync({ planDigest: created.planDigest }), isCode("io"));
-  } finally {
-    delete process.env.NODE_WORKSPACE_TEST_FAIL_LOCK;
+  for (const mode of ["before-link", "after-link"]) {
+    process.env.NODE_WORKSPACE_TEST_FAIL_LOCK = mode;
+    try {
+      await assert.rejects(() => f.sync({ planDigest: created.planDigest }), isCode("io"));
+    } finally {
+      delete process.env.NODE_WORKSPACE_TEST_FAIL_LOCK;
+    }
+    await assert.rejects(() => fs.lstat(lockFile), /ENOENT/);
+    assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
   }
-  await assert.rejects(() => fs.lstat(lockFile), /ENOENT/);
-  assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
   const applied = await f.sync({ planDigest: created.planDigest });
   assert.equal(applied.status, "applied");
 });
