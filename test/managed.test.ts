@@ -853,7 +853,11 @@ test("an end frame delivered before a send error is still an unknown outcome", a
     node: "node-1",
     remotePath: f.remotePath,
   });
-  for (let attempt = 0; attempt < 200 && status.value.revision !== 1; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < 200 && (status.value.revision !== 1 || status.value.readiness !== "ready");
+    attempt += 1
+  ) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     status = await managedStatus(f.harness.transport, f.config.gateway, {
       node: "node-1",
