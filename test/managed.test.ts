@@ -849,11 +849,19 @@ test("an end frame delivered before a send error is still an unknown outcome", a
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
-  const status = await managedStatus(f.harness.transport, f.config.gateway, {
+  let status = await managedStatus(f.harness.transport, f.config.gateway, {
     node: "node-1",
     remotePath: f.remotePath,
   });
+  for (let attempt = 0; attempt < 200 && status.value.revision !== 1; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    status = await managedStatus(f.harness.transport, f.config.gateway, {
+      node: "node-1",
+      remotePath: f.remotePath,
+    });
+  }
   assert.equal(status.value.revision, 1);
+  assert.equal(status.value.readiness, "ready");
 });
 
 test("a missing asserted owner or a foreign owner is refused on sync and status", async () => {
