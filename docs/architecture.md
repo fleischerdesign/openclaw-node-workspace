@@ -1,207 +1,105 @@
 # Architecture
 
-## One package, two hosts
+The plugin keeps one **durable managed source workspace** per project on a paired node. The node
+path never changes across syncs, build caches stay in place, and the plugin owns only the source
+files it has committed in its registry.
 
-`node-workspace` is a single plugin entry, loaded by both OpenClaw hosts:
+## Surfaces
 
-- The **Gateway** registers three agent tools, a node-invoke policy, and the transport adapter over
-  `api.runtime.nodes`.
-- The **node host** registers three duplex node commands that perform all filesystem work.
+| Surface | Kind | Purpose |
+| --- | --- | --- |
+| `node_workspace_sync` | agent tool | Preview or apply one managed source update |
+| `node_workspace_status` | agent tool | Readiness, revision, policy, drift summary, owned inventory |
+| `node_workspace_artifact` | agent tool | Fetch one selected file back, exclusively |
+| `nodews.sync` | node command (duplex) | Plan, stage, transaction, commit |
+| `nodews.status` | node command | Read-only registry and source scan |
+| `nodews.fetch` | node command (duplex) | Artifact streaming |
 
-Both registration paths run in both processes. That is intentional and harmless: a node has no
-agent tool surface, and a Gateway has no node command surface. The authority boundary is the OpenClaw
-node channel, not which process loaded a module.
+There is no arbitrary command parameter, no archive format, and no general bidirectional merge in
+this release.
+
+## Gateway side
+
+1. Resolve the node id and the **host session workspace**. The workspace is the authority; configured
+   `gateway.localRoots` and `gateway.artifactRoots` can only narrow it. There is no working-directory
+   fallback.
+2. Resolve the effective policy and scan the selected local source. Cache and dependency subtrees are
+   skipped before `lstat`; protected paths are counted and never hashed or sent.
+3. Open one duplex channel and send a hello with the selected manifest, policy, owner identity,
+   operation id, revision CAS and optional plan digest.
+4. For an apply, the node returns a canonical plan; the Gateway streams only the requested payloads,
+   verifying each against the digest from its own scan.
+
+## Node side
+
+Each configured managed root owns a state directory beside the workspace:
 
 ```
-agent
-  │  node_workspace_push
-  ▼
-Gateway tool ──► policy + allowlist ──► openDuplex("nodews.push")
-  │                                             │
-  │  framed duplex (control + file chunks)      │
-  ▼                                             ▼
-node command "nodews.push" ──► mkdir claim ──► write+verify ──► finalize marker ──► destination
-                                                              │
-agent ◄── nodeId + cwd + digest ──────────────────────────────┘
-  │
-  └─ native exec: host=node, workdir=<cwd>
+<root>/.nodews-state/
+  state.json                    per-volume identity pin (device + inode)
+  workspaces/<key>.json         registry record for one remote path
+  locks/<key>.lock              single mutation lock with process identity
+  tx/<key>/journal.json         write-ahead transaction journal
+  tx/<key>/stage/               fsynced staged payloads
+  tx/<key>/backup/              renamed pre-transaction files
 ```
 
-The plugin never executes a shell command and never opens an SSH connection. Execution stays with
-the native `exec` tool, which retains its own approvals and node allowlists.
+The registry, not a file inside the workspace, is the ownership record. A marker-shaped file in the
+tree is ordinary untracked data and grants nothing.
 
-## Components
+### Plan
 
-| File | Responsibility |
-| --- | --- |
-| `src/index.ts` | Entry point; registers tools, node commands, and the invoke policy. |
-| `src/config.ts` | Fail-closed config validation with explicit defaults. |
-| `src/manifest.ts` | Deterministic scan of one selected directory; independent manifest validation. |
-| `src/digest.ts` | Canonical manifest bytes, tree digest, content-derived push id. |
-| `src/paths.ts` | Absolute-path, relative-path, traversal, and marker-name rules. |
-| `src/frames.ts` | Binary frame codec (one control byte + JSON or file bytes). |
-| `src/transport.ts` | `FrameSession`: ordered frame queue, timeouts, closure semantics. |
-| `src/gateway/*` | Tool definitions, push/artifact/status/return engines, runtime adapter. |
-| `src/gateway/workspace-root.ts` | Chooses the session workspace, with the agent workspace as the fallback. |
-| `src/gateway/workspace-boundary.ts` | Resolves and checks the local boundary every gateway operation shares. |
-| `src/return-plan.ts` | Pure comparison of a node manifest, a local manifest and a base manifest; plan digest. |
-| `src/node/*` | Node command handlers, framed-session helpers and no-clobber filesystem helpers. |
+The node independently scans its source tree and builds the diff from three inputs: the committed
+base manifest (registry), the selected local manifest (hello), and the current node scan. It also
+validates every incoming path and limit independently of the Gateway.
 
-The commands declare `hasActiveWork: () => false` because all work is confined to `handle()`. The
-node host separately tracks in-flight invocations, so this does not claim idleness while a call is
-running; it only states that no background job survives the handler.
+Rules:
 
-## Why a framed duplex command
+- Only previously managed, still-selected base files missing locally are deletion candidates.
+- A node file that differs from the base blocks the update (`node-modified`).
+- A node-absent base file is `node-missing` unless the pinned preview listed it in `restore`.
+- A local addition colliding with an untracked node file blocks, even with equal bytes.
+- A file/directory type change cannot remove unmanaged descendants.
+- Selection narrowing releases management; it never deletes the node copy.
+- Re-including a released path needs an explicit `adoptPaths` entry in a pinned apply.
+- Policy, creation, adoption, deletion, restore, rebind and release transitions require a pinned
+  preview (`planDigest`).
 
-A single JSON `nodes.invoke` payload would have to carry the whole workspace inline and is bounded by
-message size. `openDuplex` is the public SDK transport for complete binary messages, and the node
-command receives them through `io.frames`. The plugin uses it for both directions, with an explicit
-protocol rather than an archive:
+### Transaction
 
-- no tar parsing, so no archive traversal or member-name ambiguity;
-- one file at a time, acknowledged by the receiver, so backpressure is implicit;
-- every file's SHA-256 crosses the wire and is recomputed on the receiving side;
-- progress frames are available while the file stream is active.
+`staging -> applying -> committed`, with the journal durable before the first source mutation and a
+committed journal durable before the registry advertises the new revision.
 
-## Push lifecycle
+- Staged payloads are fsynced and re-hashed on the node.
+- Each changed file is verified against its `before` digest, renamed to the backup area, then the
+  staged file is renamed into place. Deletions are backup-first moves.
+- Destination bytes are verified, touched directories are fsynced, then the committed journal is
+  written. The registry record and operation receipt follow; cleanup happens last.
+- A crash is repaired by the next operation: a prepared journal is discarded, an applying journal is
+  rolled back from backups, a committed journal is rolled forward into the registry.
+- External drift during recovery stops with `recovery-blocked` and preserves the backups.
 
-1. **Authorize and scan (Gateway).** `localPath` must be absolute and be a real directory. The
-   authority is the workspace OpenClaw resolved for the calling session: the path must resolve inside
-   it, and `gateway.localRoots`, when set, narrows that further. A host that supplies no workspace
-   triggers the agent-workspace fallback and, without either, a `workspace-unresolved` refusal. The
-   scan records every directory, every regular file's SHA-256, size, and executable bit. Symlinks and
-   special files fail the scan by default. The tree digest is the SHA-256 of the canonical manifest
-   JSON.
-2. **Derive the push id.** `pushId = SHA-256(nodeId + "\n" + remotePath + "\n" + treeDigest)[0..32]`.
-   Same content to the same destination is idempotent; different content is not.
-3. **Resolve an optional base.** With `incrementalFrom`, the Gateway calls `nodews.status` on the
-   base and requires `owned: true, complete: true, verified: true`. It records the base manifest and
-   marks every file whose size, SHA-256, and executable bit are unchanged for reuse. The base is
-   read-only and must differ from the new destination.
-4. **Open the channel.** `openDuplex` with `nodews.push`, an idempotency key equal to the push id,
-   the configured timeout, and the caller's abort signal.
-5. **Claim and negotiate.** The Gateway sends `hello` with the manifest, directories, total bytes,
-   digest, and, for an incremental publish, the base path, digest, and reuse list. The node
-   validates protocol version 4, every path, limits, the destination parent, and the base
-   publication before claiming. It then claims the destination with `mkdir(2)`: an existing file,
-   symlink, or directory (including an empty one) makes that call fail with `EEXIST`, so nothing is
-   ever replaced. Only after the claim does it write an `incomplete` marker and accept.
-6. **Reuse unchanged files.** For every reuse path, the node independently checks the base marker,
-   copies the file with `COPYFILE_EXCL`, applies the owner-only mode, and re-hashes the copy against
-   the incoming manifest. A base that changed after verification fails with `destination-drifted`.
-   No byte of a reused file crosses the channel.
-7. **Transfer in bounded windows.** The Gateway sends a window of up to 128 files or 8 MiB of
-   changed files, then a `batch` control with the exact count. The node writes each file with
-   `O_EXCL`/`wx` and verifies its digest, but defers durability; it returns one `files-ok` frame per
-   window. The Gateway verifies every acknowledgement entry before sending the next window. Node
-   progress frames continue to report measured counters.
-8. **Make data durable.** On `end` the node checks that every manifest file arrived (sent or
-   reused), re-hashes the tree from disk, and recomputes the tree digest. It then fsyncs every file
-   and every directory in a bounded pool, and fsyncs the destination parent. No complete marker
-   exists during this phase.
-9. **Finalize.** Only after that phase does the node atomically replace the marker with
-   `state: "complete"`; `writeMarker` fsyncs the marker file and the destination directory. It then
-   sends `result` with the digest, file count, and byte count. The Gateway compares these against
-   what it scanned before returning.
+This is not whole-tree atomicity. A reader outside the lock can observe the documented missing-name
+window during a backup-first replacement, and native `exec` does not participate in the lock.
 
-The crash rule is exact: a crash before the complete marker leaves an incomplete publication
-(status reports `complete: false`), and a complete marker means every file's data, every directory
-entry, and the destination's parent entry were durable before that marker was written. Per-file
-fsync during transfer is deliberately absent; the bounded fsync phase pays that cost once without
-requiring every file to be durable before the next file arrives.
+### Locks
 
-The destination name is never renamed over: `mkdir(2)` is the no-clobber primitive. The trade-off
-is visibility: the claimed directory appears before its files finish arriving. A reader can see an
-incomplete publication; the marker's `state` and `node_workspace_status` make that explicit.
+One lock per workspace. A live owner always blocks, regardless of age. A lock is reclaimed only when
+the recorded PID is absent or its process start time differs. An unreadable lock blocks. Each
+mutation phase re-checks the lock token (fencing), so a late handler cannot write after its lock was
+replaced.
 
-## Return lifecycle
+## Idempotency
 
-A return reads a node directory and writes only the local changes an explicit plan selected.
+An apply carries a stable 32-hex `operationId`. The registry stores a request fingerprint and outcome
+under that id. A committed receipt is returned again after later revisions advance. A different
+request under the same id is `operation-mismatch`. An interrupted receipt allows resuming the same
+intent; it is never treated as success. Receipts expire after seven days and are capped at 64
+unexpired entries per workspace; a full quota refuses new work rather than evicting live receipts.
 
-1. **Read the node tree.** `node_workspace_changes` calls `nodews.tree`, which resolves a real
-   directory inside `node.returnRoots`, scans it without following links, hashes every file, and
-   returns an independent manifest plus the plugin marker for that directory.
-2. **Scan the local project.** The Gateway scans the local target inside the session workspace (and
-   inside `gateway.returnRoots` when that list is set) with the same limits, skipping symlinks and
-   excluding the caller's patterns. It never writes.
-3. **Build a plan.** For every selected node file: absent locally is an addition; identical is
-   unchanged; a different executable bit alone is a mode change when the local mode still matches
-   the base; different content is a safe modification only when the local content still matches the
-   base. The base is the local return record keyed by node id and remote path, written after a
-   successful push or return, so a second generation can be returned. A publication marker is used
-   only when the live tree still verifies against it. Everything else is a
-   conflict. Paths that were in the base but no longer exist on the node are reported as
-   `nodeRemoved` and are never deleted. The plan digest covers every operation, conflict,
-   nodeRemoved entry, directory, the node tree digest, and both paths.
-4. **Re-derive and pin.** `node_workspace_return` requires the plan digest. It re-runs the preview;
-   a different digest is `plan-stale` and nothing is written. Conflicts are `local-conflict`.
-5. **Stage and verify.** The node re-scans its tree and refuses a tree digest that changed since the
-   preview. It streams only the selected additions and modifications. The Gateway writes them into a
-   private `.nodews-return-<id>` staging directory inside the local project, verifies every size and
-   SHA-256, and requires the node's `end` frame.
-6. **Apply with rollback.** After the stream ends, every add target must still be absent, every
-   modify target must still be a regular file whose digest equals the base, and every parent must be
-   a real directory. Additions use an exclusive link or copy; modifications copy the current file to
-   a staging backup, re-check its digest, then rename the staged file over it atomically. A failure
-   restores backups, removes files this call created, and removes created empty directories.
-7. **Record and report.** On success the Gateway writes `.nodews-return-state.json` in the local
-   project (0600) with the node content it reconciled, keyed by node id and remote path; the next
-   preview uses that record as the conflict base. A failed write does not undo the applied files; the result reports
-   `stateRecorded: false`. The result lists applied paths, the unchanged count, and the paths
-   removed on the node; empty directories are created as part of the apply. It never deletes a local file and never modifies the
-   node tree.
+## Status
 
-## Artifact lifecycle
-
-1. The Gateway validates `localPath` inside the session workspace (narrowed by
-   `gateway.artifactRoots` when set), requires the parent to be a real directory, and requires the
-   destination not to exist.
-2. `nodews.fetch` receives the request as command parameters. The node resolves the source with
-   `lstat` + `realpath`, rejects symlinks and non-regular files, and enforces the artifact boundaries
-   and size limits.
-3. The node sends `meta`, then file chunks, then `done` with the SHA-256 and byte count.
-4. The Gateway writes to a temporary file in the destination directory. After the digest and size
-   match, it publishes with `link()` (atomic exclusive create) and unlinks the temporary file. On
-   filesystems without hard links it falls back to `copyFile(..., COPYFILE_EXCL)`. `EEXIST` is always
-   reported as `destination-exists`; the existing file is untouched.
-
-## Marker and ownership
-
-Every published directory contains `.openclaw-node-workspace.json`:
-
-```json
-{
-  "plugin": "node-workspace",
-  "protocol": 1,
-  "pushId": "…",
-  "digest": "…",
-  "files": 42,
-  "bytes": 1912345,
-  "createdAt": "2026-11-06T19:00:00.000Z",
-  "state": "complete",
-  "manifest": [{ "path": "a.txt", "size": 5, "sha256": "…", "executable": false }],
-  "directories": []
-}
-```
-
-The marker records ownership, lifecycle state, and the manifest of the published tree. It is written
-as `incomplete` at claim time and atomically replaced with `complete` at the end. Status re-hashes
-the directory against the manifest and reports `complete`, `verified`, or the drift reason; a
-matching marker alone is never reported as success. Legacy markers without a state or manifest are
-reported as owned but unverifiable. The marker name is reserved in manifests.
-
-The marker is not a signature. Anyone who can write the node destination can edit both the files and
-the marker. Verification detects accidental drift and stale copies; it does not defend a Gateway
-against a node operator who deliberately fabricates a consistent tree.
-
-## What is deliberately absent
-
-- No in-place replace and no delete. A destination must be new; an incremental publish creates a
-  new generation and reuses files from an earlier one. Retiring a generation is the operator's
-  decision. This removes the destructive swap window entirely.
-- No watcher. Both directions are explicit calls; the plugin does not observe file changes.
-- No return of arbitrary subpaths outside the selected node directory, and no deletion on either
-  side.
-- No Rust sidecar or native helper. The plugin runs inside Node on both sides, and a second toolchain
-  would add build and packaging surface without changing a filesystem operation that Node already
-  performs.
+Status is read-only. With `verify: true` it hashes the node's selected source and reports
+`verification: "full"` plus bounded drift counts. With `verify: false` it reports registry metadata
+only and says `metadata-only`; it never claims a content scan it did not perform. A present journal is
+reported as `committed`, `interrupted`, or `recovery-blocked` and overrides a stale ready marker.

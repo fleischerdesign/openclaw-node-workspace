@@ -10,8 +10,8 @@ function clock(start = 1_000) {
 
 test("progress snapshots are isolated by agent and session", () => {
   const store = new TransferProgressStore();
-  store.begin({ sessionKey: "agent:main:a" }, "one", "push");
-  store.begin({ sessionKey: "agent:main:b" }, "two", "push");
+  store.begin({ sessionKey: "agent:main:a" }, "one", "sync");
+  store.begin({ sessionKey: "agent:main:b" }, "two", "sync");
   store.begin({ sessionKey: "agent:main:a", agentId: "other" }, "three", "fetch");
 
   assert.deepEqual(
@@ -31,9 +31,9 @@ test("progress snapshots are isolated by agent and session", () => {
 test("multiple transfers coexist and keep their own terminal state", () => {
   const c = clock();
   const store = new TransferProgressStore(c.now);
-  store.begin({ sessionKey: "s" }, "first", "push");
+  store.begin({ sessionKey: "s" }, "first", "sync");
   store.begin({ sessionKey: "s" }, "second", "fetch");
-  store.updateFromPush({ sessionKey: "s" }, "first", {
+  store.updateFromSync({ sessionKey: "s" }, "first", {
     phase: "sending",
     filesDone: 3,
     filesTotal: 5,
@@ -59,11 +59,11 @@ test("multiple transfers coexist and keep their own terminal state", () => {
 test("terminal entries expire without inventing a completion for running ones", () => {
   const c = clock();
   const store = new TransferProgressStore(c.now);
-  store.begin({ sessionKey: "s" }, "done", "push");
+  store.begin({ sessionKey: "s" }, "done", "sync");
   store.finish({ sessionKey: "s" }, "done", "completed");
-  store.begin({ sessionKey: "s" }, "lost", "push");
+  store.begin({ sessionKey: "s" }, "lost", "sync");
   store.finish({ sessionKey: "s" }, "lost", "unknown");
-  store.begin({ sessionKey: "s" }, "running", "push");
+  store.begin({ sessionKey: "s" }, "running", "sync");
 
   c.advance(10_000);
   const after = store.snapshot({ sessionKey: "s" });
@@ -78,8 +78,8 @@ test("terminal entries expire without inventing a completion for running ones", 
 
 test("clearing a session drops every transfer for that scope only", () => {
   const store = new TransferProgressStore();
-  store.begin({ sessionKey: "a" }, "one", "push");
-  store.begin({ sessionKey: "b" }, "two", "push");
+  store.begin({ sessionKey: "a" }, "one", "sync");
+  store.begin({ sessionKey: "b" }, "two", "sync");
   assert.equal(store.clearScope({ sessionKey: "a" }), true);
   assert.equal(store.clearScope({ sessionKey: "a" }), false);
   assert.deepEqual(store.snapshot({ sessionKey: "a" }), []);
@@ -88,7 +88,7 @@ test("clearing a session drops every transfer for that scope only", () => {
 
 test("a snapshot exposes measured counters only, never paths or node identity", () => {
   const store = new TransferProgressStore();
-  store.begin({ sessionKey: "s" }, "one", "push");
+  store.begin({ sessionKey: "s" }, "one", "sync");
   const [entry] = store.snapshot({ sessionKey: "s" });
   assert.ok(entry);
   assert.deepEqual(Object.keys(entry).sort(), [

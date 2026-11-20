@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { resolvePluginConfig } from "../src/config.js";
 import { NodeWorkspaceError } from "../src/errors.js";
-import { pushWorkspace } from "../src/gateway/push.js";
+import { syncManaged } from "../src/gateway/sync.js";
 import { createTools } from "../src/gateway/tools.js";
 import {
   assertLocalAccess,
@@ -104,12 +104,13 @@ test("no workspace at all fails closed", async () => {
     config: resolvePluginConfig(raw).gateway,
     configError: undefined,
     ...(resolved.workspaceError !== undefined ? { workspaceError: resolved.workspaceError } : {}),
-  }).find((candidate) => candidate.name === "node_workspace_push");
+  }).find((candidate) => candidate.name === "node_workspace_sync");
   assert.ok(tool);
   const result = await tool.execute("call-noworkspace", {
     node: "node-1",
     localPath: "/tmp",
     remotePath: "/tmp/nodews-noworkspace",
+    mode: "preview",
   });
   assert.equal(result.details.ok, false);
   assert.equal(result.details.code, "workspace-unresolved");
@@ -130,42 +131,50 @@ test("gateway.localRoots narrows the session workspace when set", async () => {
   );
 });
 
-test("a push outside the session workspace is refused before the channel opens", async () => {
-  const workspace = await directory("nodews-push-session-");
+test("a sync outside the session workspace is refused before the channel opens", async () => {
+  const workspace = await directory("nodews-sync-session-");
   const source = path.join(workspace, "project");
   await fs.mkdir(source);
   await fs.writeFile(path.join(source, "a.txt"), "alpha");
-  const outside = await directory("nodews-push-outside-");
+  const outside = await directory("nodews-sync-outside-");
   await fs.writeFile(path.join(outside, "secret.txt"), "secret");
-  const destination = await directory("nodews-push-session-dst-");
+  const destination = await directory("nodews-sync-session-dst-");
   const raw = { gateway: {}, node: { pushRoots: [destination] } };
   const harness = createHarness(createNodeCommands(raw).commands);
   const config = resolvePluginConfig(raw).gateway;
+  const base = {
+    node: "node-1" as const,
+    workspaceRoot: workspace,
+    mode: "preview" as const,
+    operationId: "0".repeat(32),
+    create: true,
+    adopt: false,
+    adoptPaths: [],
+    restore: [],
+    rebind: false,
+    expectedRevision: undefined,
+    planDigest: undefined,
+    policy: {},
+    owner: { agentId: "main", sessionKey: "agent:main:test" },
+    signal: undefined,
+    progress: undefined,
+  };
 
   await assert.rejects(
-    pushWorkspace(harness.transport, config, {
-      node: "node-1",
+    syncManaged(harness.transport, config, {
+      ...base,
       localPath: outside,
-      workspaceRoot: workspace,
       remotePath: path.join(destination, "app"),
-      incrementalFrom: undefined,
-      exclude: undefined,
-      signal: undefined,
-      progress: undefined,
     }),
     isCode("path-outside-root"),
   );
   assert.deepEqual(harness.opens, []);
 
-  const outcome = await pushWorkspace(harness.transport, config, {
-    node: "node-1",
+  const previewOutcome = await syncManaged(harness.transport, config, {
+    ...base,
     localPath: source,
-    workspaceRoot: workspace,
     remotePath: path.join(destination, "app"),
-    incrementalFrom: undefined,
-    exclude: undefined,
-    signal: undefined,
-    progress: undefined,
   });
-  assert.equal(outcome.status, "published");
+  assert.equal(previewOutcome.status, "planned");
+  assert.deepEqual(harness.opens, ["nodews.sync"]);
 });

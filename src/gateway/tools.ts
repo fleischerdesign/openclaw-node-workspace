@@ -4,12 +4,12 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 
 import type { GatewayConfig } from "../config.js";
 import { NodeWorkspaceError } from "../errors.js";
+import type { PolicyInput, PolicyPreset } from "../policy.js";
 import type { NodeTransport } from "../transport.js";
 import { fetchArtifact } from "./artifact.js";
-import { pushWorkspace, type PushProgress } from "./push.js";
-import { MAX_RETURN_OPERATIONS, applyReturn, previewReturn, type ReturnProgress } from "./return.js";
+import { managedStatus } from "./managed-status.js";
+import { syncManaged, type SyncOutcome, type SyncProgress } from "./sync.js";
 import type { TransferProgressStore, TransferScope } from "./progress-store.js";
-import { workspaceStatus, type StatusOutcome } from "./status.js";
 
 export interface ToolDependencies {
   readonly transport: NodeTransport;
@@ -17,13 +17,10 @@ export interface ToolDependencies {
   readonly configError: string | undefined;
   /** Workspace directory the host resolved for this session; absent fails closed. */
   readonly workspaceDir?: string | undefined;
-  /** Why the host resolved no workspace; explained in the refusal. */
   readonly workspaceError?: string | undefined;
-  /** Session identity supplied by the host; absent for direct in-process tests. */
+  /** Authenticated session identity supplied by the host. */
   readonly scope?: TransferScope;
-  /** Session-scoped measured progress registry. */
   readonly progress?: TransferProgressStore;
-  /** Wake feature subscribers after the registry changed. */
   readonly onProgressChange?: (terminal?: boolean) => void;
 }
 
@@ -38,6 +35,11 @@ export interface AgentUpdate {
   };
 }
 
+export interface ToolFailure {
+  content: { type: "text"; text: string }[];
+  details: Record<string, unknown>;
+}
+
 function requireConfig(deps: ToolDependencies): GatewayConfig {
   if (!deps.config) {
     throw new NodeWorkspaceError("config-invalid", deps.configError ?? "plugin configuration is invalid");
@@ -45,35 +47,16 @@ function requireConfig(deps: ToolDependencies): GatewayConfig {
   return deps.config;
 }
 
-/**
- * The workspace authority for this registration.
- *
- * A missing workspace is reported as `workspace-unresolved` at the point a
- * path is checked, so the caller sees which directory it lacked rather than a
- * generic failure.
- */
 function requireWorkspace(deps: ToolDependencies, operation: string): string {
   if (deps.workspaceDir !== undefined && deps.workspaceDir.length > 0) return deps.workspaceDir;
   const detail = deps.workspaceError ?? "the host resolved no workspace directory for this session";
   throw new NodeWorkspaceError("workspace-unresolved", `${detail}; refusing to ${operation}`);
 }
 
-export interface ToolFailure {
-  content: { type: "text"; text: string }[];
-  details: Record<string, unknown>;
-}
-
-/**
- * Return a coded failure as an ordinary tool result.
- *
- * OpenClaw's tools.invoke boundary turns a thrown plugin error into a generic
- * internal_error, which hides unknown-outcome and every other code from the
- * agent. A structured details object preserves the outcome the caller needs.
- */
 export function toolFailure(
   tool: string,
   error: unknown,
-  context: { node?: string; remotePath?: string; localPath?: string } = {},
+  context: { node?: string; remotePath?: string; localPath?: string; operationId?: string } = {},
 ): ToolFailure {
   if (!(error instanceof NodeWorkspaceError)) throw error;
   const unknown = error.code === "unknown-outcome";
@@ -83,9 +66,9 @@ export function toolFailure(
     message: error.message,
     unknownOutcome: unknown,
   };
-  for (const key of ["pushId", "nodeId", "remotePath", "localPath", "partial"] as const) {
+  for (const key of ["operationId", "nodeId", "remotePath", "localPath", "readiness", "paths"] as const) {
     const value = error.details[key];
-    if (typeof value === "string" || typeof value === "boolean") details[key] = value;
+    if (typeof value === "string" || Array.isArray(value)) details[key] = value;
   }
   for (const [key, value] of Object.entries(context)) {
     if (typeof value === "string" && details[key] === undefined) details[key] = value;
@@ -97,7 +80,7 @@ export function toolFailure(
   };
 }
 
-function progressText(progress: PushProgress): string {
+function progressText(progress: SyncProgress): string {
   const total = progress.filesTotal;
   const files = total === 0 ? "scanning" : `${progress.filesDone}/${total} files`;
   const mib = (progress.bytesDone / (1024 * 1024)).toFixed(1);
@@ -120,14 +103,6 @@ function requireField(record: Record<string, unknown>, key: string, maximum: num
   return value;
 }
 
-interface PushParams {
-  readonly node: string;
-  readonly localPath: string;
-  readonly remotePath: string;
-  readonly incrementalFrom: string | undefined;
-  readonly exclude: readonly string[] | undefined;
-}
-
 function parsePatternArray(value: unknown, label: string): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > 200) {
@@ -141,111 +116,206 @@ function parsePatternArray(value: unknown, label: string): string[] | undefined 
   });
 }
 
-interface ReturnParams {
-  readonly node: string;
-  readonly remotePath: string;
-  readonly localPath: string;
-  readonly include: readonly string[] | undefined;
-  readonly exclude: readonly string[] | undefined;
+function parsePolicy(value: unknown): PolicyInput {
+  if (value === undefined) return {};
+  const record = requireRecord(value, "policy");
+  const preset = record.preset;
+  if (preset !== undefined && preset !== "none" && preset !== "node" && preset !== "rust") {
+    throw new NodeWorkspaceError("path-invalid", 'policy.preset must be "none", "node" or "rust"');
+  }
+  return {
+    ...(preset !== undefined ? { preset: preset as PolicyPreset } : {}),
+    include: parsePatternArray(record.include, "policy.include"),
+    exclude: parsePatternArray(record.exclude, "policy.exclude"),
+    protect: parsePatternArray(record.protect, "policy.protect"),
+  };
 }
 
-function parseReturnParams(value: unknown, withDigest: boolean): ReturnParams & { planDigest?: string } {
-  const record = requireRecord(value, "return parameters");
-  const planDigest = withDigest ? requireField(record, "planDigest", 64) : undefined;
-  if (withDigest && !/^[0-9a-f]{64}$/.test(planDigest ?? "")) {
+interface SyncParams {
+  readonly node: string;
+  readonly localPath: string;
+  readonly remotePath: string;
+  readonly mode: "preview" | "apply";
+  readonly operationId: string;
+  readonly create: boolean;
+  readonly adopt: boolean;
+  readonly adoptPaths: readonly string[];
+  readonly restore: readonly string[];
+  readonly rebind: boolean;
+  readonly expectedRevision: number | undefined;
+  readonly planDigest: string | undefined;
+  readonly policy: PolicyInput;
+}
+
+function parseSyncParams(value: unknown): SyncParams {
+  const record = requireRecord(value, "sync parameters");
+  const mode = record.mode ?? "apply";
+  if (mode !== "preview" && mode !== "apply") {
+    throw new NodeWorkspaceError("path-invalid", 'mode must be "preview" or "apply"');
+  }
+  const operationId =
+    record.operationId === undefined ? randomUUID().replace(/-/gu, "").slice(0, 32) : requireField(record, "operationId", 32);
+  if (mode === "apply" && !/^[0-9a-f]{32}$/u.test(operationId)) {
+    throw new NodeWorkspaceError(
+      "path-invalid",
+      "operationId must be 32 lowercase hex characters and stable across retries of the same intent",
+    );
+  }
+  const planDigest = record.planDigest === undefined ? undefined : requireField(record, "planDigest", 64);
+  if (planDigest !== undefined && !/^[0-9a-f]{64}$/u.test(planDigest)) {
     throw new NodeWorkspaceError("path-invalid", "planDigest must be 64 lowercase hex characters");
   }
-  return {
-    node: requireField(record, "node", 256),
-    remotePath: requireField(record, "remotePath", 4096),
-    localPath: requireField(record, "localPath", 4096),
-    include: parsePatternArray(record.include, "include"),
-    exclude: parsePatternArray(record.exclude, "exclude"),
-    ...(planDigest ? { planDigest } : {}),
-  };
-}
-
-function parsePushParams(value: unknown): PushParams {
-  const record = requireRecord(value, "push parameters");
-  const incrementalValue = record.incrementalFrom;
-  let incrementalFrom: string | undefined;
-  if (incrementalValue !== undefined) {
-    incrementalFrom = requireField(record, "incrementalFrom", 4096);
+  const expectedRevision =
+    record.expectedRevision === undefined ? undefined : Number(record.expectedRevision);
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+    throw new NodeWorkspaceError("path-invalid", "expectedRevision must be a non-negative integer");
   }
+  const boolean = (key: string): boolean => {
+    const raw = record[key];
+    if (raw === undefined) return false;
+    if (typeof raw !== "boolean") throw new NodeWorkspaceError("path-invalid", `${key} must be a boolean`);
+    return raw;
+  };
   return {
     node: requireField(record, "node", 256),
     localPath: requireField(record, "localPath", 4096),
     remotePath: requireField(record, "remotePath", 4096),
-    incrementalFrom,
-    exclude: parsePatternArray(record.exclude, "exclude"),
+    mode,
+    operationId,
+    create: boolean("create"),
+    adopt: boolean("adopt"),
+    adoptPaths: parsePatternArray(record.adoptPaths, "adoptPaths") ?? [],
+    restore: parsePatternArray(record.restore, "restore") ?? [],
+    rebind: boolean("rebind"),
+    expectedRevision,
+    planDigest,
+    policy: parsePolicy(record.policy),
   };
 }
 
-function parseArtifactParams(value: unknown): { node: string; remotePath: string; localPath: string } {
-  const record = requireRecord(value, "artifact parameters");
-  return {
-    node: requireField(record, "node", 256),
-    remotePath: requireField(record, "remotePath", 4096),
-    localPath: requireField(record, "localPath", 4096),
-  };
-}
-
-function parseStatusParams(value: unknown): { node: string; remotePath: string } {
-  const record = requireRecord(value, "status parameters");
-  return {
-    node: requireField(record, "node", 256),
-    remotePath: requireField(record, "remotePath", 4096),
-  };
-}
-
-const pushParameters = Type.Object(
+const policySchema = Type.Object(
   {
-    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
-    localPath: Type.String({
-      minLength: 1,
-      description:
-        "Absolute path of the Gateway directory to publish. It must resolve inside the session workspace; " +
-        "gateway.localRoots, when set, narrows that further.",
-    }),
-    remotePath: Type.String({
-      minLength: 1,
-      description:
-        "Absolute POSIX destination directory on the node. It must not exist; this plugin never replaces an existing directory.",
-    }),
-    incrementalFrom: Type.Optional(
-      Type.String({
-        minLength: 1,
-        description:
-          "Absolute remotePath of a previous plugin-owned publication to reuse unchanged files from. " +
-          "Only changed bytes cross the channel; the base directory is never modified. The new destination must still be new.",
-      }),
-    ),
-    exclude: Type.Optional(
-      Type.Array(Type.String({ minLength: 1 }), {
-        description: "Additional minimatch patterns relative to the selected workspace root.",
-      }),
-    ),
+    preset: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("node"), Type.Literal("rust")])),
+    include: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    exclude: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    protect: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   },
   { additionalProperties: false },
 );
 
-const pushSuccess = Type.Object(
+const syncParameters = Type.Object(
+  {
+    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
+    localPath: Type.String({
+      minLength: 1,
+      description: "Absolute Gateway source directory. It must resolve inside the session workspace.",
+    }),
+    remotePath: Type.String({
+      minLength: 1,
+      description: "Stable absolute destination directory on the node. It must stay the same across syncs.",
+    }),
+    mode: Type.Optional(
+      Type.Union([Type.Literal("preview"), Type.Literal("apply")], {
+        description:
+          "preview plans and writes nothing; apply updates the workspace. Creation, adoption, deletion, " +
+          "restore, rebind and policy changes require the planDigest from a preview.",
+      }),
+    ),
+    operationId: Type.Optional(
+      Type.String({
+        minLength: 32,
+        maxLength: 32,
+        description:
+          "Stable 32-hex id for one apply intent. A retry with the same id returns the original receipt instead of reapplying.",
+      }),
+    ),
+    create: Type.Optional(Type.Boolean({ description: "Authorize creating a new managed workspace." })),
+    adopt: Type.Optional(
+      Type.Boolean({ description: "Authorize adopting an existing unmanaged directory after a pinned preview." }),
+    ),
+    adoptPaths: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        description: "Exact previously released paths to re-adopt. Requires a pinned preview.",
+      }),
+    ),
+    restore: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        description:
+          "Exact base paths missing on the node whose local content still equals the base. Requires a pinned preview.",
+      }),
+    ),
+    rebind: Type.Optional(
+      Type.Boolean({ description: "Move the binding to a different local project under the same authenticated owner." }),
+    ),
+    expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
+    planDigest: Type.Optional(Type.String({ minLength: 64, maxLength: 64 })),
+    policy: Type.Optional(policySchema),
+  },
+  { additionalProperties: false },
+);
+
+const planCountsSchema = Type.Object(
+  {
+    add: Type.Number(),
+    change: Type.Number(),
+    delete: Type.Number(),
+    mode: Type.Number(),
+    restore: Type.Number(),
+    conflicts: Type.Number(),
+    unchanged: Type.Number(),
+    untracked: Type.Number(),
+    released: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+
+const planOperationSchema = Type.Object(
+  {
+    kind: Type.Union([
+      Type.Literal("add"),
+      Type.Literal("change"),
+      Type.Literal("delete"),
+      Type.Literal("mode"),
+      Type.Literal("restore"),
+    ]),
+    path: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+const syncSuccess = Type.Object(
   {
     ok: Type.Literal(true),
-    status: Type.Union([Type.Literal("published"), Type.Literal("already-applied")]),
+    status: Type.Union([
+      Type.Literal("planned"),
+      Type.Literal("applied"),
+      Type.Literal("noop"),
+      Type.Literal("replayed"),
+    ]),
     nodeId: Type.String(),
     cwd: Type.String(),
-    pushId: Type.String(),
+    operationId: Type.String(),
+    revision: Type.Number(),
     digest: Type.String(),
-    files: Type.Number(),
-    bytes: Type.Number(),
-    reusedFiles: Type.Number(),
-    reusedBytes: Type.Number(),
+    planDigest: Type.String(),
+    counts: planCountsSchema,
+    operations: Type.Array(planOperationSchema),
+    conflicts: Type.Array(
+      Type.Object({ path: Type.String(), reason: Type.String() }, { additionalProperties: false }),
+    ),
+    restorable: Type.Array(Type.String()),
+    createRequired: Type.Boolean(),
+    adoptRequired: Type.Boolean(),
+    policyChanged: Type.Boolean(),
+    safeForRoutine: Type.Boolean(),
+    caches: Type.Literal("preserved-not-validated"),
+    verification: Type.Literal("full"),
+    recovery: Type.String(),
+    protectedCount: Type.Number(),
+    untracked: Type.Number(),
     transferredBytes: Type.Number(),
-    stateRecorded: Type.Boolean(),
     durationMs: Type.Number(),
-    skipped: Type.Number(),
-    skippedPaths: Type.Array(Type.String()),
+    truncated: Type.Boolean(),
   },
   { additionalProperties: false },
 );
@@ -255,18 +325,16 @@ const failureShape = {
   code: Type.String(),
   message: Type.String(),
   unknownOutcome: Type.Boolean(),
-  pushId: Type.Optional(Type.String()),
+  operationId: Type.Optional(Type.String()),
   node: Type.Optional(Type.String()),
   nodeId: Type.Optional(Type.String()),
   remotePath: Type.Optional(Type.String()),
   localPath: Type.Optional(Type.String()),
-  partial: Type.Optional(Type.Boolean()),
+  readiness: Type.Optional(Type.String()),
+  paths: Type.Optional(Type.Array(Type.String())),
 } as const;
 
-const pushFailure = Type.Object(failureShape, { additionalProperties: false });
-const pushDetails = Type.Union([pushSuccess, pushFailure]);
-
-const artifactFailure = pushFailure;
+const syncFailure = Type.Object(failureShape, { additionalProperties: false });
 
 const artifactParameters = Type.Object(
   {
@@ -300,35 +368,16 @@ const artifactDetails = Type.Object(
 const statusParameters = Type.Object(
   {
     node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
-    remotePath: Type.String({ minLength: 1, description: "Absolute POSIX destination directory on the node." }),
-  },
-  { additionalProperties: false },
-);
-
-const markerSchema = Type.Object(
-  {
-    plugin: Type.Literal("node-workspace"),
-    protocol: Type.Literal(1),
-    pushId: Type.String(),
-    digest: Type.String(),
-    files: Type.Number(),
-    bytes: Type.Number(),
-    createdAt: Type.String(),
-    state: Type.Union([Type.Literal("complete"), Type.Literal("incomplete"), Type.Literal("legacy")]),
-    manifest: Type.Optional(
-      Type.Array(
-        Type.Object(
-          {
-            path: Type.String(),
-            size: Type.Number(),
-            sha256: Type.String(),
-            executable: Type.Boolean(),
-          },
-          { additionalProperties: false },
-        ),
-      ),
+    remotePath: Type.Optional(
+      Type.String({ minLength: 1, description: "Absolute managed directory on the node. Omit for owned inventory." }),
     ),
-    directories: Type.Optional(Type.Array(Type.String())),
+    operationId: Type.Optional(
+      Type.String({ minLength: 32, maxLength: 32, description: "Query the durable receipt of one operation." }),
+    ),
+    verify: Type.Optional(
+      Type.Boolean({ description: "Hash selected source on the node. False reports registry metadata only." }),
+    ),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
   },
   { additionalProperties: false },
 );
@@ -337,176 +386,126 @@ const statusDetails = Type.Object(
   {
     ok: Type.Literal(true),
     nodeId: Type.String(),
-    remotePath: Type.String(),
-    exists: Type.Boolean(),
-    parentExists: Type.Boolean(),
-    owned: Type.Boolean(),
-    complete: Type.Boolean(),
-    verified: Type.Boolean(),
-    drift: Type.Union([Type.String(), Type.Null()]),
-    marker: Type.Union([markerSchema, Type.Null()]),
+    remotePath: Type.Optional(Type.String()),
+    exists: Type.Optional(Type.Boolean()),
+    directory: Type.Optional(Type.Boolean()),
+    owned: Type.Optional(Type.Boolean()),
+    adoptionRequired: Type.Optional(Type.Boolean()),
+    readiness: Type.Optional(Type.String()),
+    revision: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    digest: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    policy: Type.Optional(Type.Unknown()),
+    verification: Type.Optional(Type.String()),
+    dirty: Type.Optional(Type.Union([Type.Unknown(), Type.Null()])),
+    operation: Type.Optional(Type.Union([Type.Unknown(), Type.Null()])),
+    protectedCount: Type.Optional(Type.Number()),
+    journal: Type.Optional(Type.Boolean()),
+    localProject: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    epoch: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+    reboundFrom: Type.Optional(Type.Array(Type.String())),
+    stateDir: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    updatedAt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    workspaces: Type.Optional(Type.Array(Type.Unknown())),
+    truncated: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );
 
-const changesParameters = Type.Object(
-  {
-    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
-    remotePath: Type.String({
-      minLength: 1,
-      description: "Absolute directory on the node to compare and return. Must be inside node.returnRoots.",
-    }),
-    localPath: Type.String({
-      minLength: 1,
-      description:
-        "Absolute local project directory to compare against. It must resolve inside the session workspace; " +
-        "gateway.returnRoots, when set, narrows that further.",
-    }),
-    include: Type.Optional(
-      Type.Array(Type.String({ minLength: 1 }), { description: "Optional minimatch patterns to select node paths." }),
-    ),
-    exclude: Type.Optional(
-      Type.Array(Type.String({ minLength: 1 }), { description: "Optional minimatch patterns to omit on both sides." }),
-    ),
-  },
-  { additionalProperties: false },
-);
+const MAX_REPORTED_PATHS = 200;
 
-const returnParameters = Type.Object(
-  {
-    node: Type.String({ minLength: 1, description: "Paired node id or exact display name." }),
-    remotePath: Type.String({ minLength: 1, description: "Absolute node directory. Must be inside node.returnRoots." }),
-    localPath: Type.String({
-      minLength: 1,
-      description:
-        "Absolute local project directory. It must resolve inside the session workspace; " +
-        "gateway.returnRoots, when set, narrows that further.",
-    }),
-    planDigest: Type.String({
-      minLength: 64,
-      maxLength: 64,
-      description: "The planDigest returned by node_workspace_changes. A changed plan is rejected.",
-    }),
-    include: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-    exclude: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-  },
-  { additionalProperties: false },
-);
-
-const returnPlanEntry = Type.Object(
-  {
-    kind: Type.Union([Type.Literal("add"), Type.Literal("modify"), Type.Literal("chmod")]),
-    path: Type.String(),
-    size: Type.Number(),
-    sha256: Type.String(),
-    executable: Type.Boolean(),
-    baseSha256: Type.Optional(Type.String()),
-  },
-  { additionalProperties: false },
-);
-
-const returnConflictEntry = Type.Object(
-  {
-    path: Type.String(),
-    reason: Type.String(),
-    localSha256: Type.Optional(Type.String()),
-    baseSha256: Type.Optional(Type.String()),
-    nodeSha256: Type.Optional(Type.String()),
-  },
-  { additionalProperties: false },
-);
-
-const changesDetails = Type.Object(
-  {
-    ok: Type.Literal(true),
-    nodeId: Type.String(),
-    remotePath: Type.String(),
-    localPath: Type.String(),
-    treeDigest: Type.String(),
-    planDigest: Type.String(),
-    nodeOwned: Type.Boolean(),
-    nodeVerified: Type.Boolean(),
-    drift: Type.Union([Type.String(), Type.Null()]),
-    counts: Type.Object(
-      {
-        additions: Type.Number(),
-        modifications: Type.Number(),
-        modeChanges: Type.Number(),
-        unchanged: Type.Number(),
-        conflicts: Type.Number(),
-        nodeRemoved: Type.Number(),
-      },
-      { additionalProperties: false },
-    ),
-    operations: Type.Array(returnPlanEntry),
-    conflicts: Type.Array(returnConflictEntry),
-    nodeRemoved: Type.Array(Type.String()),
-    directories: Type.Array(Type.String()),
-    truncated: Type.Boolean(),
-  },
-  { additionalProperties: false },
-);
-
-const returnDetails = Type.Object(
-  {
-    ok: Type.Literal(true),
-    nodeId: Type.String(),
-    localPath: Type.String(),
-    treeDigest: Type.String(),
-    planDigest: Type.String(),
-    applied: Type.Array(
-      Type.Object(
-        { path: Type.String(), kind: Type.Union([Type.Literal("add"), Type.Literal("modify"), Type.Literal("chmod")]) },
-        { additionalProperties: false },
-      ),
-    ),
-    unchanged: Type.Number(),
-    removedOnNode: Type.Array(Type.String()),
-    bytesTransferred: Type.Number(),
-    stateRecorded: Type.Boolean(),
-    durationMs: Type.Number(),
-  },
-  { additionalProperties: false },
-);
-
-const MAX_REPORTED_PATHS = MAX_RETURN_OPERATIONS;
+function summarize(plan: SyncOutcome["plan"]): {
+  operations: { kind: string; path: string }[];
+  conflicts: { path: string; reason: string }[];
+  restorable: string[];
+  createRequired: boolean;
+  adoptRequired: boolean;
+  policyChanged: boolean;
+  safeForRoutine: boolean;
+  truncated: boolean;
+} {
+  if (plan === undefined) {
+    return {
+      operations: [],
+      conflicts: [],
+      restorable: [],
+      createRequired: false,
+      adoptRequired: false,
+      policyChanged: false,
+      safeForRoutine: true,
+      truncated: false,
+    };
+  }
+  return {
+    operations: plan.entries.slice(0, MAX_REPORTED_PATHS).map((entry) => ({ kind: entry.kind, path: entry.path })),
+    conflicts: plan.conflicts.slice(0, MAX_REPORTED_PATHS).map((entry) => ({
+      path: entry.path,
+      reason: entry.reason,
+    })),
+    restorable: plan.restorable.slice(0, MAX_REPORTED_PATHS),
+    createRequired: plan.createRequired,
+    adoptRequired: plan.adoptRequired,
+    policyChanged: plan.policyChanged,
+    safeForRoutine: plan.safeForRoutine,
+    truncated:
+      plan.entries.length > MAX_REPORTED_PATHS ||
+      plan.conflicts.length > MAX_REPORTED_PATHS ||
+      plan.restorable.length > MAX_REPORTED_PATHS,
+  };
+}
 
 export function createTools(deps: ToolDependencies): AnyAgentTool[] {
-  // Deliberately absolute-path only: a relative path would otherwise depend on
-  // the process working directory instead of the workspace the host resolved.
   return [
     {
-      name: "node_workspace_push",
-      label: "Publish a workspace to a node",
+      name: "node_workspace_sync",
+      label: "Sync a persistent workspace to a node",
       description:
-        "Publish one explicitly selected local directory to a paired node over the OpenClaw node channel. " +
-        "This is one-way (Gateway to node), verifies every file by SHA-256, and claims a new destination with mkdir(2) before writing. " +
-        "It does not run commands: the result returns the node id and remote cwd so you can invoke the native exec tool with host=node yourself. " +
-        "The destination must be new. With incrementalFrom, unchanged files are copied on the node from a previously published generation, so only changed bytes cross the channel; the base is never modified. An existing directory with the same content is reported as already-applied only after its bytes are re-verified; a different directory is a conflict and is never replaced.",
-      parameters: pushParameters,
-      outputSchema: pushDetails,
+        "Update one stable managed source directory on a paired node in place. Unchanged files are not rewritten, " +
+        "build caches (node_modules, target, configured excludes) are preserved and never read, and protected secret-like " +
+        "paths never cross the channel. A node edit that differs from the committed base blocks the update; nothing is " +
+        "silently overwritten or deleted. Deletions, creation, adoption, restore, rebind and policy changes require a " +
+        "pinned preview: call with mode=preview, then apply with the returned planDigest. A no-op writes nothing. " +
+        "Use a stable operationId for apply; a retry after an unknown outcome returns the original receipt.",
+      parameters: syncParameters,
+      outputSchema: Type.Union([syncSuccess, syncFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
-        let context: { node?: string; remotePath?: string; localPath?: string } = {};
+        let context: { node?: string; remotePath?: string; localPath?: string; operationId?: string } = {};
         const transferId = randomUUID();
         const scope = deps.scope;
         const tracked = scope && deps.progress ? { scope, store: deps.progress } : undefined;
         let settled = false;
         try {
           const config = requireConfig(deps);
-          const input = parsePushParams(params);
-          const workspaceRoot = requireWorkspace(deps, "push a workspace");
-          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
-          tracked?.store.begin(tracked.scope, transferId, "push");
-          const outcome = await pushWorkspace(deps.transport, config, {
+          const input = parseSyncParams(params);
+          const workspaceRoot = requireWorkspace(deps, "sync a workspace");
+          context = {
+            node: input.node,
+            remotePath: input.remotePath,
+            localPath: input.localPath,
+            operationId: input.operationId,
+          };
+          tracked?.store.begin(scope as TransferScope, transferId, "sync");
+          const outcome = await syncManaged(deps.transport, config, {
             node: input.node,
             localPath: input.localPath,
             remotePath: input.remotePath,
             workspaceRoot,
-            incrementalFrom: input.incrementalFrom,
-            exclude: input.exclude,
+            operationId: input.operationId,
+            mode: input.mode,
+            create: input.create,
+            adopt: input.adopt,
+            adoptPaths: input.adoptPaths,
+            restore: input.restore,
+            rebind: input.rebind,
+            expectedRevision: input.expectedRevision,
+            planDigest: input.planDigest,
+            policy: input.policy,
+            owner: {
+              agentId: scope?.agentId ?? null,
+              sessionKey: scope?.sessionKey ?? null,
+            },
             signal,
             progress: (progress) => {
-              tracked?.store.updateFromPush(tracked.scope, transferId, progress);
+              if (tracked) tracked.store.updateFromSync(tracked.scope, transferId, progress);
               deps.onProgressChange?.();
               onUpdate?.({
                 content: [{ type: "text", text: progressText(progress) }],
@@ -515,39 +514,38 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   text: progressText(progress),
                   visibility: "channel",
                   privacy: "public",
-                  id: "node-workspace-push",
+                  id: "node-workspace-sync",
                 },
               });
             },
           });
-          tracked?.store.finish(tracked.scope, transferId, "completed");
+          tracked?.store.finish(scope as TransferScope, transferId, "completed");
           settled = true;
           deps.onProgressChange?.(true);
-          const mib = (outcome.bytes / (1024 * 1024)).toFixed(2);
-          const verb = outcome.status === "already-applied" ? "already present" : "published";
-          // Without the reuse counts a caller cannot tell whether the incremental
-          // path did anything: the totals look the same as a full copy.
-          const reuseNote =
-            outcome.reusedFiles === 0
+          const detail = summarize(outcome.plan);
+          const counts = outcome.counts;
+          const summary =
+            `${counts.add} add, ${counts.change} change, ${counts.delete} delete, ${counts.mode} mode, ` +
+            `${counts.restore} restore, ${counts.unchanged} unchanged`;
+          const conflicts =
+            detail.conflicts.length === 0
               ? ""
-              : ` ${outcome.reusedFiles} file(s) reused from the base (${(outcome.reusedBytes / (1024 * 1024)).toFixed(2)} MiB), ${(outcome.transferredBytes / (1024 * 1024)).toFixed(2)} MiB transferred. `;
-          const skippedNote =
-            outcome.skipped.length === 0
-              ? ""
-              : ` ${outcome.skipped.length} entries were skipped (symlink or exclude rule); see details.skippedPaths.`;
+              : ` Conflicts: ${detail.conflicts.map((entry) => `${entry.path} (${entry.reason})`).join(", ")}.`;
+          const next =
+            outcome.status === "planned"
+              ? detail.conflicts.length > 0
+                ? " Nothing will be written until these are resolved."
+                : ` Apply with planDigest ${outcome.planDigest}.`
+              : "";
+          const recovery = outcome.recovery === "clean" ? "" : ` Recovery: ${outcome.recovery}.`;
           return {
             content: [
               {
                 type: "text" as const,
                 text:
-                  `${verb}: ${outcome.files} files (${mib} MiB) at ${outcome.cwd} on node ${outcome.nodeId}. ` +
-                  `sha256 tree digest ${outcome.digest}. ` +
-                  reuseNote +
-                  `One-way copy; later Gateway changes are not synchronized. ` +
-                  (outcome.stateRecorded ? "A local return baseline was recorded." : "No local return baseline was recorded; the first return may report conflicts.") +
-                  skippedNote +
-                  ` ` +
-                  `Run commands there with the exec tool: host=node, node=${outcome.nodeId}, workdir=${outcome.cwd}.`,
+                  `${outcome.status}: ${outcome.cwd} on node ${outcome.nodeId}, revision ${outcome.revision}, ` +
+                  `digest ${outcome.digest || "none"}. ${summary}.${conflicts}${next}${recovery} ` +
+                  `Caches are preserved but not validated. Run commands there with exec: host=node, node=${outcome.nodeId}, workdir=${outcome.cwd}.`,
               },
             ],
             details: {
@@ -555,17 +553,26 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               status: outcome.status,
               nodeId: outcome.nodeId,
               cwd: outcome.cwd,
-              pushId: outcome.pushId,
+              operationId: outcome.operationId,
+              revision: outcome.revision,
               digest: outcome.digest,
-              files: outcome.files,
-              bytes: outcome.bytes,
-              reusedFiles: outcome.reusedFiles,
-              reusedBytes: outcome.reusedBytes,
+              planDigest: outcome.planDigest,
+              counts,
+              operations: detail.operations,
+              conflicts: detail.conflicts,
+              restorable: detail.restorable,
+              createRequired: detail.createRequired,
+              adoptRequired: detail.adoptRequired,
+              policyChanged: detail.policyChanged,
+              safeForRoutine: detail.safeForRoutine,
+              caches: outcome.caches,
+              verification: outcome.verification,
+              recovery: outcome.recovery,
+              protectedCount: outcome.protectedCount,
+              untracked: outcome.untracked,
               transferredBytes: outcome.transferredBytes,
-              stateRecorded: outcome.stateRecorded,
               durationMs: outcome.durationMs,
-              skipped: outcome.skipped.length,
-              skippedPaths: outcome.skipped.map((entry) => entry.path),
+              truncated: outcome.truncated || detail.truncated,
             },
           };
         } catch (error) {
@@ -577,10 +584,62 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   ? "cancelled"
                   : "failed";
             const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
-            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
+            if (tracked) tracked.store.finish(tracked.scope, transferId, state, reasonCode);
             deps.onProgressChange?.(true);
           }
-          return toolFailure("node_workspace_push", error, context);
+          return toolFailure("node_workspace_sync", error, context);
+        }
+      },
+    },
+    {
+      name: "node_workspace_status",
+      label: "Inspect managed node workspaces",
+      description:
+        "Read-only managed workspace status. With remotePath it reports readiness, revision, policy, protected/untracked " +
+        "counts and, when verify is true, a source-only drift summary hashed on the node. With operationId it returns the " +
+        "durable receipt for that operation. Without remotePath it lists the bounded owned inventory. " +
+        "Use it after an unknown outcome before any retry.",
+      parameters: statusParameters,
+      outputSchema: Type.Union([statusDetails, syncFailure]),
+      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+        let context: { node?: string; remotePath?: string; operationId?: string } = {};
+        try {
+          const config = requireConfig(deps);
+          const record = requireRecord(params, "status parameters");
+          const node = requireField(record, "node", 256);
+          const remotePath =
+            record.remotePath === undefined ? undefined : requireField(record, "remotePath", 4096);
+          const operationId =
+            record.operationId === undefined ? undefined : requireField(record, "operationId", 32);
+          if (operationId !== undefined && !/^[0-9a-f]{32}$/u.test(operationId)) {
+            throw new NodeWorkspaceError("path-invalid", "operationId must be 32 lowercase hex characters");
+          }
+          const verify = record.verify === undefined ? undefined : record.verify === true;
+          const limit = typeof record.limit === "number" ? record.limit : undefined;
+          context = { node, ...(remotePath !== undefined ? { remotePath } : {}), ...(operationId ? { operationId } : {}) };
+          const outcome = await managedStatus(deps.transport, config, {
+            node,
+            ...(remotePath !== undefined ? { remotePath } : {}),
+            ...(operationId !== undefined ? { operationId } : {}),
+            ...(verify !== undefined ? { verify } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+            ...(signal ? { signal } : {}),
+          });
+          const value = outcome.value;
+          const text =
+            remotePath === undefined
+              ? `Owned workspaces on node ${outcome.nodeId}: ${Array.isArray(value.workspaces) ? value.workspaces.length : 0}.`
+              : value.owned === true
+                ? `${String(value.remotePath)}: readiness ${String(value.readiness)}, revision ${String(value.revision)}, verification ${String(value.verification)}.`
+                : value.exists === true
+                  ? `${String(value.remotePath)} exists but is not managed by this plugin; adoption needs a pinned preview.`
+                  : `${String(value.remotePath)} does not exist on node ${outcome.nodeId}.`;
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { ok: true as const, nodeId: outcome.nodeId, ...value },
+          };
+        } catch (error) {
+          return toolFailure("node_workspace_status", error, context);
         }
       },
     },
@@ -592,7 +651,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         "The bytes are verified against the node's SHA-256 before publication and the destination is created exclusively: " +
         "an existing file is never overwritten.",
       parameters: artifactParameters,
-      outputSchema: Type.Union([artifactDetails, artifactFailure]),
+      outputSchema: Type.Union([artifactDetails, syncFailure]),
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
         let context: { node?: string; remotePath?: string; localPath?: string } = {};
         const transferId = randomUUID();
@@ -601,18 +660,21 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
         let settled = false;
         try {
           const config = requireConfig(deps);
-          const input = parseArtifactParams(params);
+          const input = requireRecord(params, "artifact parameters");
+          const node = requireField(input, "node", 256);
+          const remotePath = requireField(input, "remotePath", 4096);
+          const localPath = requireField(input, "localPath", 4096);
           const workspaceRoot = requireWorkspace(deps, "fetch an artifact");
-          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
-          tracked?.store.begin(tracked.scope, transferId, "fetch");
+          context = { node, remotePath, localPath };
+          tracked?.store.begin(scope as TransferScope, transferId, "fetch");
           const outcome = await fetchArtifact(deps.transport, config, {
-            node: input.node,
-            remotePath: input.remotePath,
-            localPath: input.localPath,
+            node,
+            remotePath,
+            localPath,
             workspaceRoot,
             signal,
             progress: (bytesDone, bytesTotal) => {
-              tracked?.store.updateFetch(tracked.scope, transferId, bytesDone, bytesTotal);
+              tracked?.store.updateFetch(tracked!.scope, transferId, bytesDone, bytesTotal);
               deps.onProgressChange?.();
               if (onUpdate) {
                 const percent = bytesTotal === 0 ? 100 : Math.floor((bytesDone / bytesTotal) * 100);
@@ -629,7 +691,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
               }
             },
           });
-          tracked?.store.finish(tracked.scope, transferId, "completed");
+          tracked?.store.finish(scope as TransferScope, transferId, "completed");
           settled = true;
           deps.onProgressChange?.(true);
           return {
@@ -657,259 +719,10 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
                   ? "cancelled"
                   : "failed";
             const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
-            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
+            if (tracked) tracked.store.finish(tracked.scope, transferId, state, reasonCode);
             deps.onProgressChange?.(true);
           }
           return toolFailure("node_workspace_artifact", error, context);
-        }
-      },
-    },
-    {
-      name: "node_workspace_status",
-      label: "Inspect a node workspace copy",
-      description:
-        "Read-only: report whether a node destination exists and whether it was published by this plugin, including its push id and tree digest. " +
-        "Use this after an unknown outcome before retrying anything.",
-      parameters: statusParameters,
-      outputSchema: Type.Union([statusDetails, artifactFailure]),
-      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
-        let context: { node?: string; remotePath?: string; localPath?: string } = {};
-        try {
-          const config = requireConfig(deps);
-          const input = parseStatusParams(params);
-          context = { node: input.node, remotePath: input.remotePath };
-          const outcome: StatusOutcome = await workspaceStatus(deps.transport, config, {
-            node: input.node,
-            remotePath: input.remotePath,
-            signal,
-          });
-          const text = !outcome.exists
-            ? `${outcome.remotePath} does not exist on node ${outcome.nodeId}.`
-            : outcome.owned && outcome.verified
-              ? `${outcome.remotePath} is owned by this plugin and its bytes still match the published manifest (push ${outcome.marker?.pushId}, digest ${outcome.marker?.digest}).`
-              : outcome.owned
-                ? `${outcome.remotePath} has a marker but the content no longer matches: ${outcome.drift ?? "verification failed"}.`
-                : `${outcome.remotePath} exists but has no node-workspace marker; this plugin did not publish it.`;
-          return {
-            content: [{ type: "text" as const, text }],
-            details: {
-              ok: true as const,
-              nodeId: outcome.nodeId,
-              remotePath: outcome.remotePath,
-              exists: outcome.exists,
-              parentExists: outcome.parentExists,
-              owned: outcome.owned,
-              complete: outcome.complete,
-              verified: outcome.verified,
-              drift: outcome.drift,
-              marker: outcome.marker,
-            },
-          };
-        } catch (error) {
-          return toolFailure("node_workspace_status", error, context);
-        }
-      },
-    },
-    {
-      name: "node_workspace_changes",
-      label: "Preview a project tree return from a node",
-      description:
-        "Read-only preview of the files a paired node generated or changed in one directory, compared with a local project directory. " +
-        "Reports additions, safe modifications, mode changes, unchanged files, conflicts, and paths removed on the node. " +
-        "It never writes, overwrites, or deletes anything. Pass the returned planDigest to node_workspace_return to apply exactly this plan.",
-      parameters: changesParameters,
-      outputSchema: Type.Union([changesDetails, artifactFailure]),
-      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
-        let context: { node?: string; remotePath?: string; localPath?: string } = {};
-        try {
-          const config = requireConfig(deps);
-          const input = parseReturnParams(params, false);
-          const workspaceRoot = requireWorkspace(deps, "preview a return");
-          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
-          const preview = await previewReturn(deps.transport, config, {
-            node: input.node,
-            remotePath: input.remotePath,
-            localPath: input.localPath,
-            workspaceRoot,
-            include: input.include,
-            exclude: input.exclude,
-            signal,
-          });
-          const plan = preview.plan;
-          const operations = plan.operations.slice(0, MAX_REPORTED_PATHS).map((entry) => ({
-            kind: entry.kind,
-            path: entry.path,
-            size: entry.size,
-            sha256: entry.sha256,
-            executable: entry.executable,
-            ...(entry.baseSha256 ? { baseSha256: entry.baseSha256 } : {}),
-          }));
-          const conflicts = plan.conflicts.slice(0, MAX_REPORTED_PATHS).map((entry) => ({
-            path: entry.path,
-            reason: entry.reason,
-            ...(entry.localSha256 ? { localSha256: entry.localSha256 } : {}),
-            ...(entry.baseSha256 ? { baseSha256: entry.baseSha256 } : {}),
-            ...(entry.nodeSha256 ? { nodeSha256: entry.nodeSha256 } : {}),
-          }));
-          const truncated =
-            plan.operations.length > MAX_REPORTED_PATHS ||
-            plan.conflicts.length > MAX_REPORTED_PATHS ||
-            plan.nodeRemoved.length > MAX_REPORTED_PATHS;
-          const counts = plan.counts;
-          const summary =
-            `${counts.additions} addition(s), ${counts.modifications} modification(s), ${counts.modeChanges} mode change(s), ` +
-            `${counts.unchanged} unchanged, ${counts.conflicts} conflict(s), ${counts.nodeRemoved} path(s) removed on the node.`;
-          const conflictText =
-            counts.conflicts === 0
-              ? "No conflicts."
-              : ` Conflicts: ${plan.conflicts
-                  .slice(0, 20)
-                  .map((entry) => `${entry.path} (${entry.reason})`)
-                  .join(", ")}${plan.conflicts.length > 20 ? ", …" : ""}. Resolve them before applying.`;
-          const removedText =
-            counts.nodeRemoved === 0
-              ? ""
-              : " Paths removed on the node are reported and never deleted locally.";
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `Preview returning ${plan.remotePath} on node ${plan.nodeId} into ${plan.localPath}: ${summary}` +
-                  conflictText +
-                  removedText +
-                  ` planDigest ${plan.planDigest}. Apply with node_workspace_return and this digest; a changed plan is rejected.`,
-              },
-            ],
-            details: {
-              ok: true as const,
-              nodeId: plan.nodeId,
-              remotePath: plan.remotePath,
-              localPath: plan.localPath,
-              treeDigest: plan.treeDigest,
-              planDigest: plan.planDigest,
-              nodeOwned: preview.tree.owned,
-              nodeVerified: preview.tree.verified,
-              drift: preview.tree.drift,
-              counts,
-              operations,
-              conflicts,
-              nodeRemoved: plan.nodeRemoved.slice(0, MAX_REPORTED_PATHS).map((entry) => entry.path),
-              directories: plan.directories.slice(0, MAX_REPORTED_PATHS),
-              truncated,
-            },
-          };
-        } catch (error) {
-          return toolFailure("node_workspace_changes", error, context);
-        }
-      },
-    },
-    {
-      name: "node_workspace_return",
-      label: "Return changed project files from a node",
-      description:
-        "Apply one previewed node_workspace_changes plan to the local project directory. " +
-        "The planDigest must match a fresh preview exactly; conflicts, a changed node tree, or a locally modified file abort the call before anything is written. " +
-        "Files are staged and verified over the node channel first, then applied with an exclusive create for additions and a re-checked atomic replace for safe modifications. " +
-        "Files removed on the node are reported and never deleted locally. Modes are owner-only (0600 or 0700).",
-      parameters: returnParameters,
-      outputSchema: Type.Union([returnDetails, artifactFailure]),
-      async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: AgentUpdate) => void) {
-        let context: { node?: string; remotePath?: string; localPath?: string } = {};
-        const transferId = randomUUID();
-        const scope = deps.scope;
-        const tracked = scope && deps.progress ? { scope, store: deps.progress } : undefined;
-        let settled = false;
-        try {
-          const config = requireConfig(deps);
-          const input = parseReturnParams(params, true);
-          const workspaceRoot = requireWorkspace(deps, "return a project tree");
-          if (input.planDigest === undefined) {
-            throw new NodeWorkspaceError("path-invalid", "planDigest is required");
-          }
-          context = { node: input.node, remotePath: input.remotePath, localPath: input.localPath };
-          tracked?.store.begin(tracked.scope, transferId, "return");
-          const outcome = await applyReturn(deps.transport, config, {
-            node: input.node,
-            remotePath: input.remotePath,
-            localPath: input.localPath,
-            workspaceRoot,
-            include: input.include,
-            exclude: input.exclude,
-            planDigest: input.planDigest,
-            signal,
-            progress: (progress: ReturnProgress) => {
-              tracked?.store.updateReturn(tracked.scope, transferId, progress);
-              deps.onProgressChange?.();
-              if (onUpdate) {
-                const files =
-                  progress.filesTotal === 0 ? "preparing" : `${progress.filesDone}/${progress.filesTotal} files`;
-                const text = `Node workspace return ${progress.phase}: ${files}`;
-                onUpdate({
-                  content: [{ type: "text", text }],
-                  details: { phase: progress.phase },
-                  progress: {
-                    text,
-                    visibility: "channel",
-                    privacy: "public",
-                    id: "node-workspace-return",
-                  },
-                });
-              }
-            },
-          });
-          tracked?.store.finish(tracked.scope, transferId, "completed");
-          settled = true;
-          deps.onProgressChange?.(true);
-          const additions = outcome.applied.filter((entry) => entry.kind === "add").length;
-          const modifications = outcome.applied.filter((entry) => entry.kind === "modify").length;
-          const modes = outcome.applied.filter((entry) => entry.kind === "chmod").length;
-          const removedText =
-            outcome.removedOnNode.length === 0
-              ? ""
-              : ` ${outcome.removedOnNode.length} path(s) were removed on the node and were not deleted locally.`;
-          const stateText = outcome.stateRecorded
-            ? ""
-            : " The local return baseline could not be recorded; the next preview may report a conflict.";
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `Returned into ${outcome.localPath}: ${additions} added, ${modifications} modified, ${modes} mode change(s); ` +
-                  `${outcome.unchanged} unchanged, ${outcome.bytesTransferred} bytes transferred.` +
-                  removedText +
-                  stateText +
-                  ` planDigest ${outcome.planDigest}.`,
-              },
-            ],
-            details: {
-              ok: true as const,
-              nodeId: outcome.nodeId,
-              localPath: outcome.localPath,
-              treeDigest: outcome.treeDigest,
-              planDigest: outcome.planDigest,
-              applied: outcome.applied,
-              unchanged: outcome.unchanged,
-              removedOnNode: outcome.removedOnNode,
-              bytesTransferred: outcome.bytesTransferred,
-              stateRecorded: outcome.stateRecorded,
-              durationMs: outcome.durationMs,
-            },
-          };
-        } catch (error) {
-          if (!settled) {
-            const state =
-              error instanceof NodeWorkspaceError && error.code === "unknown-outcome"
-                ? "unknown"
-                : signal?.aborted || (error instanceof NodeWorkspaceError && error.code === "canceled")
-                  ? "cancelled"
-                  : "failed";
-            const reasonCode = error instanceof NodeWorkspaceError ? error.code : undefined;
-            tracked?.store.finish(tracked.scope, transferId, state, reasonCode);
-            deps.onProgressChange?.(true);
-          }
-          return toolFailure("node_workspace_return", error, context);
         }
       },
     },

@@ -7,7 +7,7 @@
 #     proves the plumbing, not the model's choice.
 #   - this script asks a real provider model the same task over the real
 #     chat-completions path. Nothing about the decision is scripted: the prompt
-#     states the outcome, and the model must choose node_workspace_push, then
+#     states the outcome, and the model must choose node_workspace_sync in preview and apply modes, then
 #     exec with host=node and the returned cwd, then node_workspace_artifact.
 #
 # What is real: a Gateway and a node host process under a temporary HOME, state,
@@ -203,7 +203,7 @@ const gateway = {
     auth: { mode: "none" },
     nodes: {
       pairing: { autoApproveCidrs: [] },
-      commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] },
+      commands: { allow: ["nodews.sync", "nodews.fetch", "nodews.status"] },
     },
   },
   models: { mode: "merge" },
@@ -324,7 +324,7 @@ NODE
 
 stage "start node host with the system.run surface advertised"
 setsid "$WORK/isolated" node openclaw node run --host 127.0.0.1 --port "$PORT" --no-tls --display-name "e2e-node" \
-  --commands nodews.push,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
+  --commands nodews.sync,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
 NODE_PID=$!
 
 stage "wait for pairing and approve the declared surface"
@@ -355,7 +355,7 @@ node - "$WORK/tools.json" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const names = JSON.stringify(report);
-for (const tool of ["node_workspace_push", "node_workspace_artifact", "node_workspace_status"]) {
+for (const tool of ["node_workspace_sync", "node_workspace_artifact", "node_workspace_status"]) {
   if (!names.includes(tool)) throw new Error(`plugin tool ${tool} is not registered on the gateway`);
 }
 console.log("plugin tools registered on the gateway");

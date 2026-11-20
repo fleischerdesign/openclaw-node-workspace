@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Scripted, OpenAI-compatible chat-completions server for the progress harness.
 //
-// It is a model test double with one decision: call node_workspace_push on the
+// It is a model test double with two decisions: preview, then apply node_workspace_sync on the
 // first request and answer "PROGRESS DONE" once the push result is present.
 // Everything else (agent loop, tool dispatch, node transport) is real. The
 // harness keeps the fixture large enough that the push is still running while
@@ -55,15 +55,33 @@ function toolResultText(message) {
 
 function decide(messages) {
   const completed = completedToolCalls(messages);
-  const push = completed.find((entry) => entry.name === "node_workspace_push");
-  if (!push) {
+  const syncs = completed.filter((entry) => entry.name === "node_workspace_sync");
+  if (syncs.length === 0) {
     return {
       kind: "tool",
-      tool: "node_workspace_push",
-      args: { node: nodeName, localPath: pushLocalPath, remotePath: pushRemotePath },
+      tool: "node_workspace_sync",
+      args: { node: nodeName, localPath: pushLocalPath, remotePath: pushRemotePath, mode: "preview", create: true },
     };
   }
-  return { kind: "text", text: "PROGRESS DONE: node_workspace_push returned. " + push.text.slice(0, 120) };
+  if (syncs.length === 1) {
+    const text = syncs[0].text ?? "";
+    const match = /Apply with planDigest ([0-9a-f]{64})/u.exec(text);
+    if (!match) return { kind: "text", text: "PROGRESS DONE: preview had no planDigest. " + text.slice(0, 160) };
+    return {
+      kind: "tool",
+      tool: "node_workspace_sync",
+      args: {
+        node: nodeName,
+        localPath: pushLocalPath,
+        remotePath: pushRemotePath,
+        mode: "apply",
+        create: true,
+        planDigest: match[1],
+        operationId: "progress".padEnd(32, "0"),
+      },
+    };
+  }
+  return { kind: "text", text: "PROGRESS DONE: node_workspace_sync returned. " + syncs[1].text.slice(0, 120) };
 }
 
 function sseChunk(res, payload) {

@@ -1,173 +1,118 @@
 # Operations
 
-## Install order
+## Install
 
-1. Build and pack the plugin (`npm ci && npm run build && npm pack`).
-2. Install it on the **node host** first and restart that node. The Gateway must see all five
-   commands in the node's advertised surface.
-3. Install it on the **Gateway**, enable it, and add the node command allowlist. The Gateway needs no
-   configured project directory: it reads the workspace OpenClaw resolves for the calling session,
-   with the agent workspace as the fallback. Add `gateway.localRoots`, `gateway.artifactRoots` or
-   `gateway.returnRoots` only when you want to narrow that workspace further.
-4. Approve the node's updated command surface in **Devices** if OpenClaw asks after the reconnect.
+```bash
+npm ci
+npm run build
+npm pack
+openclaw plugins install npm-pack:./fleischerdesign-openclaw-node-workspace-0.1.0.tgz --force
+```
 
-Installing only the Gateway half gives you tools that fail with a missing node command. Installing
-only the node half advertises commands that no tool calls.
+Install the same package on the Gateway and on every participating node. There is no separate
+credential or SSH surface: the plugin uses the existing authenticated node channel.
 
-## The Gateway boundary
+## Configuration
 
-The Gateway does not own a project list. OpenClaw resolves a workspace for each session and passes it
-to the plugin's tool factory; every `localPath` a tool accepts must resolve inside that workspace.
-When the host passes no workspace, the plugin resolves the agent workspace through OpenClaw's
-`resolveAgentWorkspaceDir`, and refuses with `workspace-unresolved` if that is unavailable too. A
-refusal names the workspace, so the caller sees which boundary applied.
+Gateway:
 
-`gateway.localRoots`, `gateway.artifactRoots` and `gateway.returnRoots` are optional and only narrow
-the workspace; an empty or absent list adds no restriction. Use them when a session workspace is
-wider than the directories this plugin should touch.
-
-## Configure the allowlist
-
-The commands are dangerous and are not in any default allowlist. Add exactly:
-
-```json5
-gateway: {
-  nodes: {
-    commands: {
-      allow: ["nodews.push", "nodews.fetch", "nodews.status", "nodews.tree", "nodews.return"],
-    },
-  },
+```json
+{
+  "gateway": {
+    "localRoots": ["/srv/workspace/projects"],
+    "artifactRoots": ["/srv/workspace/artifacts"],
+    "exclude": [],
+    "maxFiles": 2000,
+    "maxFileBytes": 33554432,
+    "maxTotalBytes": 268435456,
+    "chunkBytes": 65536,
+    "timeoutMs": 120000
+  }
 }
 ```
 
-A `deny` entry wins over `allow`. If a command is missing at dispatch, the error is
-`node command not allowed at dispatch` and names the reason.
+Node:
 
-## Verify before relying on it
+```json
+{
+  "node": {
+    "pushRoots": ["/srv/node-workspace"],
+    "artifactRoots": ["/srv/node-workspace"],
+    "maxFiles": 2000,
+    "maxFileBytes": 33554432,
+    "maxTotalBytes": 268435456
+  }
+}
+```
 
-1. `openclaw nodes describe <node>` must list `nodews.push`, `nodews.fetch`, `nodews.status`,
-   `nodews.tree`, and `nodews.return`.
-2. `node_workspace_status` for an absent path returns `exists: false` and, when the parent exists,
-   `parentExists: true`.
-3. Push a small directory. Confirm the result names the node id and `cwd`, then verify one file with
-   the native `exec` tool:
-   `exec host=node node=<id> workdir=<cwd> "sha256sum <file>"`. Compare that digest with the
-   per-file digest if you have it, or simply read the file.
+`localRoots` and `artifactRoots` can only narrow the session workspace the host resolves. A managed
+destination must be a child of a `pushRoots` entry, on the same device, with an existing real parent.
 
-Do not chain a push and an exec into one agent step without checking the push result. The plugin
-returns the cwd precisely so the agent can choose the next action.
+## First sync
 
-## Publish a new generation incrementally
+1. `node_workspace_sync` with `mode: "preview"`, `create: true`, `localPath`, `remotePath`, and a
+   `policy`. Read the plan: entry counts, conflicts, protected count, and `planDigest`.
+2. `node_workspace_sync` with `mode: "apply"`, the same inputs, `planDigest`, and a stable 32-hex
+   `operationId`.
+3. Run the build through `exec` with `host=node` and `workdir` equal to the returned `cwd`.
+4. Edit locally and sync again. Unchanged files are not rewritten; caches are untouched.
 
-Publishing always creates a new destination; the base is never modified.
+Use one persistent slot per concurrent job. Do not create `-vN` copies and do not delete the
+workspace to force a refresh; the path is the cache.
 
-1. Publish the first generation normally.
-2. After changing the local tree, call `node_workspace_push` with the new `remotePath` and
-   `incrementalFrom` set to the previous generation's absolute `remotePath`.
-3. The tool verifies the base with `node_workspace_status` before opening the channel. A base that
-   is not owned, complete, and verified fails with `conflict`; a base that drifted fails with
-   `destination-drifted`. No new destination is created in either case.
-4. The result reports `reusedFiles`, `reusedBytes`, and `transferredBytes`. Reused files are copied
-   on the node, so only changed bytes use the channel.
+## Routine versus pinned updates
 
-Deleting a file locally means omitting it from the new generation. The old generation keeps it. The
-plugin never removes a generation; retire old paths yourself after verifying the new one.
+- A routine apply (add/change/mode only, no conflicts) may omit `planDigest`.
+- Deletion, creation, adoption, restore, rebind, release re-inclusion and policy transitions need a
+  fresh preview and its `planDigest`.
+- `expectedRevision` is an optional CAS. A mismatch is `revision-mismatch`; preview again.
+- A no-op apply writes nothing and does not advance the revision.
 
-## Return generated changes
+## Status and recovery
 
-1. Run the generator on the node through native `exec` as usual.
-2. Call `node_workspace_changes` with the node directory and the local project directory. It is
-   read-only.
-3. Read the counts and conflicts. Resolve any conflict locally, then request a fresh preview: a
-   conflict is never forced.
-   Use `exclude` for large generated directories (`node_modules`, build caches): the node applies the
-   same patterns before its limits, so an excluded subtree cannot fail the preview.
-4. Call `node_workspace_return` with the returned `planDigest`. A changed node tree or local tree is
-   `plan-stale`; nothing is written.
-5. A preview reports at most 200 file operations. A larger plan is refused before any write; narrow
-   `include`/`exclude` or split the return. The result lists what was applied and which paths were
-   removed on the node. Those paths are not
-   deleted locally.
-6. The Gateway records the reconciled node content in `.nodews-return-state.json` (0600) inside the
-   project, keyed by node id and remote path. The next preview uses it as the conflict base, so
-   generate-return-generate works without re-publishing and two nodes with the same path keep
-   separate bases. If the file is missing or unreadable, the publication marker is used; a local file
-   that then differs from that older base is reported as a conflict rather than overwritten.
+`node_workspace_status` with `remotePath` reports readiness, revision, policy, protected/untracked
+counts and, with `verify: true` (default), a full source drift summary. Without `remotePath`, it lists
+the bounded owned inventory. With `operationId`, it returns the durable receipt.
 
-Returned additions never replace an existing local file. A modification is allowed only when the
-local file still matches the last published generation; otherwise it is a conflict. A mode change
-is applied without transferring bytes. All returned files are owner-only.
+After an `unknown-outcome`:
 
-If a return is interrupted before the node's `end` frame, the staging directory is removed and no
-local file changes; retry the same previewed plan. The staging directory is excluded from scans,
-but a killed process can leave one behind; inspect and remove it after confirming no return is
-running. If the process is killed during the short local
-apply window, inspect the project and request a fresh preview; a stale `.nodews-return-*` directory
-may remain and can be removed after confirming no return is running. The plugin does not delete it
-automatically.
+1. Query status with the same `operationId`.
+2. A committed receipt is the historic result; do not apply it again.
+3. An interrupted operation may be resumed with the same intent and id.
+4. `recovery-blocked` means the node holds bytes matching neither the base nor the target. Inspect the
+   affected paths and preserve the backup area; do not delete state blindly.
 
-## Reconcile an unknown outcome
+Recovery is automatic on the next operation: prepared journals are discarded, applying journals are
+rolled back, committed journals are rolled forward. Native `exec` processes are not fenced; stop them
+before syncing if they may write source files.
 
-`unknown-outcome` means the channel died after the node claimed the destination. The plugin cannot
-prove whether the publication completed.
+## Retention and space
 
-1. Call `node_workspace_status` with the same `remotePath`.
-2. If it reports `exists: true, owned: true, complete: true, verified: true` with the expected
-   `digest`, the push succeeded. The node re-hashed the directory against the manifest; the marker
-   alone is not the proof.
-3. If it reports `exists: false`, the push did not publish; retrying the same content is safe.
-4. If it reports `verified: false` or `owned: false`, inspect the directory manually. Never delete
-   or replace a directory you did not create; the plugin itself will not.
+- Registry, journal and receipts live under `<root>/.nodews-state`. Never delete that directory to
+  "clean up"; it is the ownership record.
+- Stage and backup data exist only during a transaction. A committed journal is cleaned on the next
+  operation if cleanup was interrupted.
+- Receipts expire after seven days. The per-workspace cap is 64 unexpired receipts; a full cap refuses
+  new work instead of evicting live receipts.
+- Only the plugin's own unreferenced transaction data is auto-cleaned. Caches and workspaces are not
+  deleted by age, marker or glob.
 
-Do not retry by changing `remotePath` to get around a conflict. That creates a second copy and hides
-the state you are trying to reconcile.
+## Upgrade
 
-## Partial publications
+The managed protocol is version 5. Managed and old generation tools do not share a path or a marker
+format; install the same package on both sides before creating a managed workspace. There is no
+migration of an old immutable generation in this release: adopt the source as a new managed workspace
+with a preview, or create the managed workspace from the local tree and leave the old directory in
+place.
 
-The destination name is claimed with `mkdir(2)` before files arrive, so a process killed mid-push
-leaves a directory with `state: "incomplete"` and some files. It is never silently treated as a
-successful copy:
+## Troubleshooting
 
-- `node_workspace_status` reports `exists: true, owned: true, complete: false, verified: false`.
-- A retry to the same path is `destination-exists`; remove the incomplete directory yourself after
-  confirming no push is still running.
-- The plugin removes the claimed directory automatically only when it is empty or contains nothing
-  but the incomplete marker. It never recursively deletes a partial tree or any foreign file.
-- A marker written before `state`/`manifest` existed is reported as owned but unverifiable
-  (`state: "legacy", verified: false`). An identical push still re-hashes against the incoming
-  manifest and can report `already-applied`; status cannot prove it afterward.
-
-There is no replacement path and no `rename` over a destination, so an existing file, symlink, or
-empty directory is never clobbered.
-
-## Disk space
-
-The plugin checks file and byte limits before sending, but not free space on the node. A full
-filesystem fails the push with an I/O error; an incomplete destination is left with its marker. Leave
-headroom for the largest configured push; publication allocates no second full copy.
-
-## Upgrades
-
-Both sides must run the same protocol version. Upgrade in this order:
-
-1. Stop publishing.
-2. Upgrade the node host plugin, restart the node, approve the changed command surface if requested.
-3. Upgrade the Gateway plugin and restart the Gateway.
-
-A Gateway on protocol 1 against a node on another version fails at `hello` with a protocol error; no
-files are written.
-
-## Logs and diagnostics
-
-- Gateway plugin failures are logged with the plugin id `node-workspace`.
-- Node command failures are logged by the node host under the same id.
-- Every tool error includes its code. `unknown-outcome` also includes the push id, node id, and
-  `remotePath` for reconciliation.
-- `openclaw plugins inspect node-workspace --runtime --json` reports whether the Gateway half
-  loaded and which tools it registered.
-
-## Removing the plugin
-
-Removing the plugin does not delete published directories or markers. Directories remain owned by
-the marker until you remove them yourself. Remove the allowlist entries when you remove the plugin so
-a later reinstall does not silently regain authority.
+| Symptom | Meaning / action |
+| --- | --- |
+| `preview-required` | The update is destructive or structural; preview it and pass `planDigest`. |
+| `conflict` with `node-modified` | The node copy changed. Retrieve or discard it explicitly; the plugin will not overwrite it. |
+| `conflict` with `untracked` | A node-only file occupies a selected path. Move, adopt or rename it. |
+| `workspace-locked` | Another operation owns the workspace lock, or the lock is unreadable. Inspect status. |
+| `workspace-forbidden` | The authenticated agent or local project does not match the registry binding. |
+| `recovery-blocked` | A previous transaction is mixed. Inspect the affected paths and the backup area. |
+| `receipt-quota-exceeded` | Too many unexpired operation receipts; wait for expiry. |

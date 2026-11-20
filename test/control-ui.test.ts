@@ -24,7 +24,7 @@ import entry from "../src/index.js";
 function transfer(overrides: Partial<Transfer> = {}): Transfer {
   return {
     transferId: "t1",
-    kind: "push",
+    kind: "sync",
     phase: "sending",
     state: "running",
     filesDone: 1,

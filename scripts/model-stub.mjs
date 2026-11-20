@@ -4,7 +4,7 @@
 // response is fixed by the conversation state recorded in the request.
 //
 // The script it plays is the one the plugin's README promises:
-//   1. node_workspace_push  -> publish a Gateway directory to the node
+//   1. node_workspace_sync  -> preview, then apply a managed workspace to the node
 //   2. exec (host=node)     -> run a command in the returned cwd
 //   3. node_workspace_artifact -> fetch the produced file back
 //   4. final assistant text
@@ -73,11 +73,21 @@ function toolResultText(message) {
 // The model's memory between calls: the push result carries the cwd the exec
 // must use, so the stub reads it back from the tool message instead of
 // guessing.
-function pushCwdFromMessages(completed) {
+function syncCwdFromMessages(completed) {
   for (const entry of completed) {
-    if (entry.name !== "node_workspace_push") continue;
+    if (entry.name !== "node_workspace_sync") continue;
     const text = toolResultText(entry.message);
-    const match = /at (\S+) on node /.exec(text);
+    const match = /^(?:planned|applied|noop|replayed): (\S+) on node /u.exec(text);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+function planDigestFromMessages(completed) {
+  for (const entry of completed) {
+    if (entry.name !== "node_workspace_sync") continue;
+    const text = toolResultText(entry.message);
+    const match = /Apply with planDigest ([0-9a-f]{64})/u.exec(text);
     if (match) return match[1];
   }
   return undefined;
@@ -86,20 +96,38 @@ function pushCwdFromMessages(completed) {
 function decideStep(messages) {
   const completed = completedToolCalls(messages);
   const names = completed.map((entry) => entry.name).filter(Boolean);
-  const pushEntry = completed.find((entry) => entry.name === "node_workspace_push");
-  const pushFailed = pushEntry
-    ? !/^(published|already present):/.test(toolResultText(pushEntry.message))
-    : false;
-  if (!names.includes("node_workspace_push") || pushFailed) {
+  const syncEntries = completed.filter((entry) => entry.name === "node_workspace_sync");
+  const syncText = syncEntries.map((entry) => toolResultText(entry.message)).join("\n");
+  const applyFailed = syncEntries.some((entry) => /^(failed|UNKNOWN OUTCOME)/u.test(toolResultText(entry.message)));
+
+  if (syncEntries.length === 0) {
     return {
       kind: "tool",
-      tool: "node_workspace_push",
-      args: { node: nodeName, localPath: pushLocalPath, remotePath: pushRemotePath },
+      tool: "node_workspace_sync",
+      args: { node: nodeName, localPath: pushLocalPath, remotePath: pushRemotePath, mode: "preview", create: true },
     };
   }
-  const cwd = pushCwdFromMessages(completed);
+  if (applyFailed) return { kind: "text", text: "sync failed; see the tool result" };
+  if (syncEntries.length === 1) {
+    const planDigest = planDigestFromMessages(completed);
+    if (!planDigest) return { kind: "text", text: "preview result did not contain a planDigest; cannot continue" };
+    return {
+      kind: "tool",
+      tool: "node_workspace_sync",
+      args: {
+        node: nodeName,
+        localPath: pushLocalPath,
+        remotePath: pushRemotePath,
+        mode: "apply",
+        create: true,
+        planDigest,
+        operationId: "e2e".padEnd(32, "0"),
+      },
+    };
+  }
+  const cwd = syncCwdFromMessages(completed);
   if (!names.includes("exec")) {
-    if (!cwd) return { kind: "text", text: "push result did not contain a cwd; cannot continue" };
+    if (!cwd) return { kind: "text", text: "apply result did not contain a cwd; cannot continue" };
     return {
       kind: "tool",
       tool: "exec",
@@ -116,7 +144,7 @@ function decideStep(messages) {
   const artifact = completed.find((entry) => entry.name === "node_workspace_artifact");
   return {
     kind: "text",
-    text: `E2E complete: pushed ${pushRemotePath}, executed in ${cwd}, fetched ${artifactRemotePath}. ${toolResultText(artifact?.message)}`.trim(),
+    text: `E2E complete: synced ${pushRemotePath}, executed in ${cwd}, fetched ${artifactRemotePath}. ${toolResultText(artifact?.message)}`.trim(),
   };
 }
 

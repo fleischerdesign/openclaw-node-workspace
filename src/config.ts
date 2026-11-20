@@ -2,8 +2,6 @@ import path from "node:path";
 
 import { NodeWorkspaceError } from "./errors.js";
 
-export type SymlinkPolicy = "reject" | "skip";
-
 export interface GatewayConfig {
   /**
    * Optional narrowing for a push. The session workspace the host resolves is
@@ -16,13 +14,6 @@ export interface GatewayConfig {
    * restriction beyond the session workspace.
    */
   readonly artifactRoots: readonly string[];
-  /**
-   * Optional narrowing for a returned project tree. Empty means no additional
-   * restriction beyond the session workspace.
-   */
-  readonly returnRoots: readonly string[];
-  readonly exclude: readonly string[];
-  readonly symlinks: SymlinkPolicy;
   readonly maxFiles: number;
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
@@ -36,8 +27,6 @@ export interface NodeConfig {
   readonly pushRoots: readonly string[];
   /** Absolute directories an artifact may be read from. Empty denies every fetch. */
   readonly artifactRoots: readonly string[];
-  /** Absolute directories a project tree may be returned from. Empty denies every return. */
-  readonly returnRoots: readonly string[];
   readonly maxFiles: number;
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
@@ -111,11 +100,6 @@ export function resolvePluginConfig(raw: unknown): PluginConfig {
   const gateway = record(root.gateway, "gateway");
   const node = record(root.node, "node");
 
-  const symlinksRaw = gateway.symlinks ?? "reject";
-  if (symlinksRaw !== "reject" && symlinksRaw !== "skip") {
-    fail('gateway.symlinks must be "reject" or "skip"');
-  }
-
   const maxFiles = positiveInteger(gateway.maxFiles, "gateway.maxFiles", DEFAULTS.maxFiles);
   const maxFileBytes = positiveInteger(gateway.maxFileBytes, "gateway.maxFileBytes", DEFAULTS.maxFileBytes);
   const maxTotalBytes = positiveInteger(gateway.maxTotalBytes, "gateway.maxTotalBytes", DEFAULTS.maxTotalBytes);
@@ -130,9 +114,6 @@ export function resolvePluginConfig(raw: unknown): PluginConfig {
     gateway: {
       localRoots: absoluteRoots(gateway.localRoots, "gateway.localRoots"),
       artifactRoots: absoluteRoots(gateway.artifactRoots, "gateway.artifactRoots"),
-      returnRoots: absoluteRoots(gateway.returnRoots, "gateway.returnRoots"),
-      exclude: stringArray(gateway.exclude, "gateway.exclude"),
-      symlinks: symlinksRaw,
       maxFiles,
       maxFileBytes,
       maxTotalBytes,
@@ -147,7 +128,6 @@ export function resolvePluginConfig(raw: unknown): PluginConfig {
     node: {
       pushRoots: absoluteRoots(node.pushRoots, "node.pushRoots"),
       artifactRoots: absoluteRoots(node.artifactRoots, "node.artifactRoots"),
-      returnRoots: absoluteRoots(node.returnRoots, "node.returnRoots"),
       maxFiles: nodeMaxFiles,
       maxFileBytes: nodeMaxFileBytes,
       maxTotalBytes: nodeMaxTotalBytes,

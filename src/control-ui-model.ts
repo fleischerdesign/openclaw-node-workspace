@@ -5,13 +5,11 @@
 // would stay on screen forever. No DOM and no timer globals in this file so the
 // expiry decision can be tested with a fake clock.
 
-export type TransferKind = "push" | "fetch" | "return";
+export type TransferKind = "sync" | "fetch";
 export type TransferPhase =
   | "scanning"
   | "sending"
-  | "publishing"
   | "fetching"
-  | "receiving"
   | "applying";
 export type TransferState = "running" | "completed" | "failed" | "unknown" | "cancelled";
 
@@ -52,9 +50,8 @@ export function rowText(entry: Transfer): string {
   const bytes = `${formatBytes(entry.bytesDone)} / ${formatBytes(entry.bytesTotal)}`;
   if (entry.state === "running") {
     if (entry.kind === "fetch") return `fetching ${bytes}`;
-    if (entry.kind === "return") return `returning ${files} · ${formatBytes(entry.bytesDone)}`;
     if (entry.phase === "scanning" && entry.filesTotal === 0) return "scanning";
-    if (entry.phase === "publishing") return `publishing ${files} · ${formatBytes(entry.bytesTotal)}`;
+    if (entry.phase === "applying") return `applying ${files} · ${formatBytes(entry.bytesDone)}`;
     return `${entry.phase} ${files} · ${formatBytes(entry.bytesDone)}`;
   }
   if (entry.state === "completed") {
@@ -66,8 +63,8 @@ export function rowText(entry: Transfer): string {
 }
 
 export function rowLabel(entry: Transfer): string {
-  if (entry.kind === "push") return "Publish";
-  return entry.kind === "fetch" ? "Fetch" : "Return";
+  if (entry.kind === "sync") return "Sync";
+  return "Fetch";
 }
 
 /** Time a terminal entry stays visible: completed 8 s, abnormal 60 s. */

@@ -14,9 +14,7 @@ export const PROGRESS_WIDGET_ID = "progress";
 const transferPhase = Type.Union([
   Type.Literal("scanning"),
   Type.Literal("sending"),
-  Type.Literal("publishing"),
   Type.Literal("fetching"),
-  Type.Literal("receiving"),
   Type.Literal("applying"),
 ]);
 
@@ -31,7 +29,7 @@ const transferState = Type.Union([
 export const transferProgressSchema = Type.Object(
   {
     transferId: Type.String({ minLength: 1, maxLength: 128 }),
-    kind: Type.Union([Type.Literal("push"), Type.Literal("fetch"), Type.Literal("return")]),
+    kind: Type.Union([Type.Literal("sync"), Type.Literal("fetch")]),
     phase: transferPhase,
     state: transferState,
     filesDone: Type.Integer({ minimum: 0 }),

@@ -53,13 +53,7 @@ if (plugin.id !== "node-workspace") throw new Error(`unexpected plugin id ${plug
 if (plugin.status !== "loaded") {
   throw new Error(`plugin status is ${plugin.status}: ${plugin.error ?? "unknown error"}`);
 }
-const expectedTools = [
-  "node_workspace_push",
-  "node_workspace_artifact",
-  "node_workspace_status",
-  "node_workspace_changes",
-  "node_workspace_return",
-];
+const expectedTools = ["node_workspace_sync", "node_workspace_artifact", "node_workspace_status"];
 for (const tool of expectedTools) {
   if (!plugin.toolNames.includes(tool)) throw new Error(`tool ${tool} is not registered`);
 }

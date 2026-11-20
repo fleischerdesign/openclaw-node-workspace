@@ -1,123 +1,119 @@
 import type { ManifestEntry } from "./digest.js";
 import { NodeWorkspaceError } from "./errors.js";
+import type { PlanConflict, PlanCounts, PlanEntry } from "./managed-plan.js";
+import { resolvePolicy, type PolicyInput, type ResolvedPolicy } from "./policy.js";
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
-/** A publish acknowledges a bounded window instead of every file. */
-export const PUSH_ACK_FILES = 128;
-export const PUSH_ACK_BYTES = 8 * 1024 * 1024;
-export const COMMAND_PUSH = "nodews.push";
+export const COMMAND_SYNC = "nodews.sync";
 export const COMMAND_FETCH = "nodews.fetch";
 export const COMMAND_STATUS = "nodews.status";
-export const COMMAND_TREE = "nodews.tree";
-export const COMMAND_RETURN = "nodews.return";
 
-/**
- * A previously published generation used as the delta base for a new publish.
- *
- * The base is never modified. Unchanged files are copied on the node from this
- * directory into the newly claimed destination, so only changed bytes cross
- * the channel.
- */
-export interface PushBase {
-  readonly remotePath: string;
-  readonly digest: string;
+/** Bounded acknowledgement window for staged payloads. */
+export const SYNC_ACK_FILES = 128;
+export const SYNC_ACK_BYTES = 8 * 1024 * 1024;
+
+/** Grace the node keeps back so it can report a typed timeout before the Gateway's budget ends. */
+export const NODE_RESPONSE_GRACE_MS = 5_000;
+
+export interface SyncOwner {
+  readonly agentId: string | null;
+  readonly sessionKey: string | null;
 }
 
-export interface TreeRequest {
-  readonly remotePath: string;
-  /** minimatch patterns the node applies before enforcing its limits. */
-  readonly exclude?: readonly string[];
-}
-
-/**
- * Ask the node to stream the selected files of one directory back to the
- * Gateway. `treeDigest` pins the scanned node tree; `planDigest` pins the
- * Gateway-side plan (including local conflict decisions).
- */
-export interface ReturnHello {
+export interface SyncHello {
   readonly t: "hello";
-  readonly protocol: 4;
+  readonly protocol: 5;
+  readonly mode: "preview" | "apply";
+  readonly operationId: string;
+  /** Node id the Gateway resolved; echoed for diagnostics, never an authority. */
+  readonly nodeId: string;
+  readonly owner: SyncOwner;
+  /** Canonical absolute local project on the Gateway. */
+  readonly localProject: string;
   readonly remotePath: string;
-  readonly paths: readonly string[];
-  readonly treeDigest: string;
-  readonly planDigest: string;
-  /** minimatch patterns used for the scan the treeDigest was computed from. */
-  readonly exclude?: readonly string[];
-}
-
-export interface PushHello {
-  readonly t: "hello";
-  readonly protocol: 4;
-  readonly pushId: string;
-  readonly remotePath: string;
-  readonly totalBytes: number;
-  readonly treeDigest: string;
+  readonly policy: ResolvedPolicy;
+  readonly create: boolean;
+  readonly adopt: boolean;
+  readonly adoptPaths: readonly string[];
+  readonly restore: readonly string[];
+  readonly rebind: boolean;
+  readonly expectedRevision?: number;
+  readonly planDigest?: string;
+  /** Gateway-side budget; the node deadline is derived from it. */
+  readonly timeoutMs: number;
   readonly manifest: readonly ManifestEntry[];
   readonly directories: readonly string[];
-  /** Present only for an incremental publish; the base stays untouched. */
-  readonly base?: PushBase;
-  /** Manifest paths copied from the base instead of being sent. */
-  readonly reuse?: readonly string[];
 }
+
+export interface SyncPlanMessage {
+  readonly t: "plan";
+  readonly planDigest: string;
+  readonly baseRevision: number;
+  readonly counts: PlanCounts;
+  readonly entries: readonly PlanEntry[];
+  readonly directories: readonly string[];
+  readonly restorable: readonly string[];
+  readonly conflicts: readonly PlanConflict[];
+  readonly createRequired: boolean;
+  readonly adoptRequired: boolean;
+  readonly policyChanged: boolean;
+  readonly safeForRoutine: boolean;
+  readonly policy: ResolvedPolicy;
+}
+
+export interface SyncResultSuccess {
+  readonly t: "result";
+  readonly ok: true;
+  readonly mode: "preview" | "apply";
+  readonly status: "planned" | "applied" | "noop" | "replayed";
+  readonly operationId: string;
+  readonly revision: number;
+  readonly digest: string;
+  readonly planDigest: string;
+  readonly counts: PlanCounts;
+  readonly applied: readonly string[];
+  readonly truncated: boolean;
+  readonly caches: "preserved-not-validated";
+  readonly verification: "full";
+  readonly recovery: "clean" | "recovered" | "rolled-back" | "committed" | "blocked";
+  readonly protectedCount: number;
+  readonly untracked: number;
+}
+
+export interface SyncResultFailure {
+  readonly t: "result";
+  readonly ok: false;
+  readonly code: string;
+  readonly message: string;
+  readonly effect: "none" | "unknown";
+  readonly readiness: string;
+  readonly affected?: readonly string[];
+}
+
+export type SyncResult = SyncResultSuccess | SyncResultFailure;
 
 export interface FetchRequest {
   readonly remotePath: string;
   readonly maxBytes: number;
 }
 
-export type GatewayControl =
-  | PushHello
-  | { readonly t: "file"; readonly path: string }
-  | { readonly t: "batch"; readonly files: number; readonly bytes: number }
-  | { readonly t: "end" };
-
-export type NodeControl =
-  | { readonly t: "accepted"; readonly pushId: string }
-  | { readonly t: "rejected"; readonly code: string; readonly message: string }
-  | { readonly t: "progress"; readonly phase: string; readonly filesDone: number; readonly bytesDone: number }
-  | {
-      readonly t: "files-ok";
-      readonly files: readonly { readonly path: string; readonly bytes: number; readonly sha256: string }[];
-    }
-  | { readonly t: "file-error"; readonly path: string; readonly code: string; readonly message: string }
-  | {
-      readonly t: "result";
-      readonly ok: true;
-      readonly pushId: string;
-      readonly digest: string;
-      readonly files: number;
-      readonly bytes: number;
-    }
-  | {
-      readonly t: "result";
-      readonly ok: false;
-      readonly code: string;
-      readonly message: string;
-      readonly published: boolean;
-    }
-  | { readonly t: "meta"; readonly size: number; readonly sha256: string | null; readonly mode: number }
-  | { readonly t: "done"; readonly sha256: string; readonly bytes: number }
-  | { readonly t: "fetch-error"; readonly code: string; readonly message: string }
-  | { readonly t: "accepted"; readonly treeDigest: string }
-  | {
-      readonly t: "file";
-      readonly path: string;
-      readonly size: number;
-      readonly sha256: string;
-      readonly executable: boolean;
-    }
-  | { readonly t: "end"; readonly treeDigest: string; readonly files: number; readonly bytes: number }
-  | { readonly t: "return-error"; readonly code: string; readonly message: string };
+export interface StatusRequest {
+  readonly remotePath?: string;
+  readonly operationId?: string;
+  readonly verify?: boolean;
+  readonly limit?: number;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function requireString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new NodeWorkspaceError("protocol", `${label} must be a non-empty string`);
+function requireString(value: unknown, label: string, maximum = 4096): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
+    throw new NodeWorkspaceError("protocol", `${label} must be a non-empty string of at most ${maximum} characters`);
   }
+  if (value.includes("\0")) throw new NodeWorkspaceError("protocol", `${label} must not contain a NUL byte`);
   return value;
 }
 
@@ -133,106 +129,89 @@ function requireSafeInteger(value: unknown, label: string, minimum = 0): number 
   return value;
 }
 
+function requireHex(value: unknown, label: string, length: number): string {
+  const text = requireString(value, label, length);
+  if (!new RegExp(`^[0-9a-f]{${length}}$`, "u").test(text)) {
+    throw new NodeWorkspaceError("protocol", `${label} must be ${length} lowercase hex characters`);
+  }
+  return text;
+}
+
+function requireStringArray(value: unknown, label: string, maximum = 2000): string[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new NodeWorkspaceError("protocol", `${label} must be an array of at most ${maximum} strings`);
+  }
+  return value.map((entry, index) => requireString(entry, `${label}[${index}]`));
+}
+
 export function parseManifestEntry(value: unknown): ManifestEntry {
   if (!isRecord(value)) throw new NodeWorkspaceError("protocol", "manifest entry must be an object");
   const path = requireString(value.path, "manifest entry path");
   const size = requireSafeInteger(value.size, "manifest entry size");
-  const sha256 = requireString(value.sha256, "manifest entry sha256");
-  if (!/^[0-9a-f]{64}$/.test(sha256)) {
-    throw new NodeWorkspaceError("protocol", `manifest entry sha256 is not lowercase hex: ${path}`);
-  }
+  const sha256 = requireHex(value.sha256, "manifest entry sha256", 64);
+  return { path, size, sha256, executable: requireBoolean(value.executable, "manifest entry executable") };
+}
+
+function parseOwner(value: unknown): SyncOwner {
+  if (!isRecord(value)) throw new NodeWorkspaceError("protocol", "hello.owner must be an object");
+  const optional = (input: unknown, label: string): string | null => {
+    if (input === null || input === undefined) return null;
+    return requireString(input, label, 512);
+  };
   return {
-    path,
-    size,
-    sha256,
-    executable: requireBoolean(value.executable, "manifest entry executable"),
+    agentId: optional(value.agentId, "hello.owner.agentId"),
+    sessionKey: optional(value.sessionKey, "hello.owner.sessionKey"),
   };
 }
 
-export function parsePushHello(value: unknown): PushHello {
-  if (!isRecord(value) || value.t !== "hello") throw new NodeWorkspaceError("protocol", "expected a hello control frame");
+export function parseSyncHello(value: unknown): SyncHello {
+  if (!isRecord(value) || value.t !== "hello") {
+    throw new NodeWorkspaceError("protocol", "expected a managed sync hello control frame");
+  }
   if (value.protocol !== PROTOCOL_VERSION) {
     throw new NodeWorkspaceError("protocol", `unsupported protocol version ${String(value.protocol)}`);
   }
-  if (!Array.isArray(value.manifest)) throw new NodeWorkspaceError("protocol", "hello.manifest must be an array");
-  if (!Array.isArray(value.directories)) {
-    throw new NodeWorkspaceError("protocol", "hello.directories must be an array");
+  const mode = value.mode;
+  if (mode !== "preview" && mode !== "apply") {
+    throw new NodeWorkspaceError("protocol", 'hello.mode must be "preview" or "apply"');
   }
-  for (const entry of value.directories) {
-    requireString(entry, "hello.directories entry");
+  if (!Array.isArray(value.manifest) || !Array.isArray(value.directories)) {
+    throw new NodeWorkspaceError("protocol", "hello.manifest and hello.directories must be arrays");
   }
-  return {
-    t: "hello",
-    protocol: PROTOCOL_VERSION,
-    pushId: requireString(value.pushId, "hello.pushId"),
-    remotePath: requireString(value.remotePath, "hello.remotePath"),
-    totalBytes: requireSafeInteger(value.totalBytes, "hello.totalBytes"),
-    treeDigest: requireString(value.treeDigest, "hello.treeDigest"),
-    manifest: value.manifest.map(parseManifestEntry),
-    directories: value.directories as string[],
-    ...parseBaseAndReuse(value),
+  if (!isRecord(value.policy)) throw new NodeWorkspaceError("protocol", "hello.policy must be an object");
+  const policyInput: PolicyInput = {
+    preset: value.policy.preset as PolicyInput["preset"],
+    include: Array.isArray(value.policy.include) ? (value.policy.include as string[]) : [],
+    exclude: Array.isArray(value.policy.exclude) ? (value.policy.exclude as string[]) : [],
+    protect: Array.isArray(value.policy.protect) ? (value.policy.protect as string[]) : [],
   };
-}
-
-function parseBaseAndReuse(value: Record<string, unknown>): { base?: PushBase; reuse?: string[] } {
-  const reuse: string[] = [];
-  if (value.reuse !== undefined) {
-    if (!Array.isArray(value.reuse)) throw new NodeWorkspaceError("protocol", "hello.reuse must be an array");
-    for (const entry of value.reuse) {
-      reuse.push(requireString(entry, "hello.reuse entry"));
-    }
-  }
-  if (value.base === undefined) {
-    if (reuse.length > 0) {
-      throw new NodeWorkspaceError("protocol", "hello.reuse requires hello.base");
-    }
-    return {};
-  }
-  if (!isRecord(value.base)) throw new NodeWorkspaceError("protocol", "hello.base must be an object");
-  const remotePath = requireString(value.base.remotePath, "hello.base.remotePath");
-  const digest = requireString(value.base.digest, "hello.base.digest");
-  if (!/^[0-9a-f]{64}$/.test(digest)) {
-    throw new NodeWorkspaceError("protocol", "hello.base.digest must be lowercase SHA-256 hex");
-  }
-  return { base: { remotePath, digest }, reuse };
-}
-
-export function parseReturnHello(value: unknown): ReturnHello {
-  if (!isRecord(value) || value.t !== "hello") {
-    throw new NodeWorkspaceError("protocol", "expected a return hello control frame");
-  }
-  if (value.protocol !== PROTOCOL_VERSION) {
-    throw new NodeWorkspaceError("protocol", "unsupported protocol version " + String(value.protocol));
-  }
-  if (!Array.isArray(value.paths)) throw new NodeWorkspaceError("protocol", "hello.paths must be an array");
-  const paths = value.paths.map((entry) => requireString(entry, "hello.paths entry"));
-  const treeDigest = requireString(value.treeDigest, "hello.treeDigest");
-  const planDigest = requireString(value.planDigest, "hello.planDigest");
-  if (!/^[0-9a-f]{64}$/.test(treeDigest)) {
-    throw new NodeWorkspaceError("protocol", "hello.treeDigest must be lowercase SHA-256 hex");
-  }
-  if (!/^[0-9a-f]{64}$/.test(planDigest)) {
-    throw new NodeWorkspaceError("protocol", "hello.planDigest must be lowercase SHA-256 hex");
-  }
-  const exclude: string[] = [];
-  if (value.exclude !== undefined) {
-    if (!Array.isArray(value.exclude) || value.exclude.length > 200) {
-      throw new NodeWorkspaceError("protocol", "hello.exclude must be an array of at most 200 patterns");
-    }
-    for (const pattern of value.exclude) {
-      const entry = requireString(pattern, "hello.exclude entry");
-      if (entry.length > 1024) throw new NodeWorkspaceError("protocol", "hello.exclude entry is too long");
-      exclude.push(entry);
-    }
-  }
+  const policy = resolvePolicy(policyInput);
+  const expectedRevisionValue = value.expectedRevision;
+  const expectedRevision =
+    expectedRevisionValue === undefined ? undefined : requireSafeInteger(expectedRevisionValue, "hello.expectedRevision");
+  const planDigestValue = value.planDigest;
+  const planDigest =
+    planDigestValue === undefined ? undefined : requireHex(planDigestValue, "hello.planDigest", 64);
   return {
     t: "hello",
     protocol: PROTOCOL_VERSION,
+    mode,
+    operationId: requireHex(value.operationId, "hello.operationId", 32),
+    nodeId: requireString(value.nodeId, "hello.nodeId", 256),
+    owner: parseOwner(value.owner),
+    localProject: requireString(value.localProject, "hello.localProject"),
     remotePath: requireString(value.remotePath, "hello.remotePath"),
-    paths,
-    treeDigest,
-    planDigest,
-    exclude,
+    policy,
+    create: requireBoolean(value.create, "hello.create"),
+    adopt: requireBoolean(value.adopt, "hello.adopt"),
+    adoptPaths: requireStringArray(value.adoptPaths, "hello.adoptPaths"),
+    restore: requireStringArray(value.restore, "hello.restore"),
+    rebind: requireBoolean(value.rebind, "hello.rebind"),
+    ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+    ...(planDigest !== undefined ? { planDigest } : {}),
+    timeoutMs: requireSafeInteger(value.timeoutMs, "hello.timeoutMs", 1000),
+    manifest: value.manifest.map(parseManifestEntry),
+    directories: requireStringArray(value.directories, "hello.directories"),
   };
 }
 
@@ -247,4 +226,19 @@ export function parseFetchRequest(value: unknown, nodeMaxBytes: number): FetchRe
     );
   }
   return { remotePath, maxBytes };
+}
+
+export function parseStatusRequest(value: unknown): StatusRequest {
+  if (!isRecord(value)) throw new NodeWorkspaceError("protocol", "status parameters must be an object");
+  const remotePath = value.remotePath === undefined ? undefined : requireString(value.remotePath, "status.remotePath");
+  const operationId =
+    value.operationId === undefined ? undefined : requireHex(value.operationId, "status.operationId", 32);
+  const verify = value.verify === undefined ? undefined : requireBoolean(value.verify, "status.verify");
+  const limit = value.limit === undefined ? undefined : requireSafeInteger(value.limit, "status.limit", 1);
+  return {
+    ...(remotePath !== undefined ? { remotePath } : {}),
+    ...(operationId !== undefined ? { operationId } : {}),
+    ...(verify !== undefined ? { verify } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  };
 }

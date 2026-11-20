@@ -9,7 +9,6 @@ test("plugin config applies safe defaults and rejects relative roots", () => {
   const config = resolvePluginConfig({ gateway: { localRoots: ["/srv/src"] }, node: { pushRoots: ["/srv/dst"] } });
   assert.deepEqual(config.gateway.localRoots, ["/srv/src"]);
   assert.deepEqual(config.gateway.artifactRoots, []);
-  assert.equal(config.gateway.symlinks, "reject");
   assert.equal(config.gateway.maxFiles, 2000);
   assert.equal(config.node.maxArtifactBytes, 32 * 1024 * 1024);
 
@@ -22,9 +21,8 @@ test("plugin config applies safe defaults and rejects relative roots", () => {
   );
 });
 
-test("plugin config rejects contradictory limits and an unknown symlink policy", () => {
+test("plugin config rejects contradictory limits", () => {
   assert.throws(() => resolvePluginConfig({ gateway: { maxFileBytes: 10, maxTotalBytes: 5 } }));
-  assert.throws(() => resolvePluginConfig({ gateway: { symlinks: "follow" } }));
   assert.throws(() => resolvePluginConfig({ gateway: { chunkBytes: 2 * 1024 * 1024 } }));
 });
 

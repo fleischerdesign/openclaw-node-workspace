@@ -2,7 +2,7 @@
 // Asserts the live end-to-end run in scripts/model-live-e2e.sh.
 //
 // The failure this catches: a genuine model (not the scripted double) fails to
-// drive the promised sequence — it does not choose node_workspace_push, does not
+// drive the promised sequence — it does not choose node_workspace_sync, does not
 // run exec on the node, does not use the pushed cwd, or does not fetch the
 // artifact — while every process still exits zero. It also catches the subtler
 // failure of a model that claims success after a different tool produced (or
@@ -106,7 +106,12 @@ const ordered = [...calls.values()];
 if (ordered.length === 0) fail("the trajectory export contains no tool calls; the model's choices are unproven");
 
 const indexOfCall = (predicate) => ordered.findIndex(predicate);
-const pushIndex = indexOfCall((call) => call.name === "node_workspace_push" && redacted(call.args?.remotePath) === REDIRECTED_REMOTE);
+const previewIndex = indexOfCall(
+  (call) => call.name === "node_workspace_sync" && call.args?.mode === "preview" && redacted(call.args?.remotePath) === REDIRECTED_REMOTE,
+);
+const applyIndex = indexOfCall(
+  (call) => call.name === "node_workspace_sync" && call.args?.mode === "apply" && redacted(call.args?.remotePath) === REDIRECTED_REMOTE,
+);
 const execIndex = indexOfCall(
   (call) => call.name === "exec" && call.args?.host === "node" && redacted(call.args?.workdir) === REDIRECTED_REMOTE,
 );
@@ -118,22 +123,22 @@ const artifactIndex = indexOfCall(
 );
 
 const names = ordered.map((call) => call.name);
-if (pushIndex < 0) fail(`no node_workspace_push targeted ${remoteDir}; calls: ${names.join(", ")}`);
+if (previewIndex < 0 || applyIndex < 0) fail(`no sync preview+apply targeted ${remoteDir}; calls: ${names.join(", ")}`);
 if (execIndex < 0) {
-  fail(`no exec ran on the node with workdir equal to the pushed cwd; calls: ${names.join(", ")}`);
+  fail(`no exec ran on the node with workdir equal to the synced cwd; calls: ${names.join(", ")}`);
 }
 if (artifactIndex < 0) {
   fail(`no node_workspace_artifact fetched the produced file to the artifact root; calls: ${names.join(", ")}`);
 }
-if (!(pushIndex < execIndex && execIndex < artifactIndex)) {
-  fail(`the required calls are not in push -> node exec -> artifact order: ${names.join(", ")}`);
+if (!(previewIndex < applyIndex && applyIndex < execIndex && execIndex < artifactIndex)) {
+  fail(`the required calls are not in preview -> apply -> node exec -> artifact order: ${names.join(", ")}`);
 }
 
 console.log(
   JSON.stringify(
     {
       model: modelRef,
-      toolOrder: [ordered[pushIndex].name, ordered[execIndex].name, ordered[artifactIndex].name],
+      toolOrder: [ordered[previewIndex].name, ordered[applyIndex].name, ordered[execIndex].name, ordered[artifactIndex].name],
       execHost: ordered[execIndex].args.host,
       execWorkdir: redacted(ordered[execIndex].args.workdir),
       artifactDigest: digest,

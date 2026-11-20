@@ -8,7 +8,8 @@ import type { GatewayConfig } from "../config.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { normalizeAbsolutePosixPath } from "../paths.js";
 import { COMMAND_FETCH } from "../protocol.js";
-import { fsyncDirectory, safeArtifactMode } from "../node/fs-atomic.js";
+import { fsyncDirectory } from "../fs-durable.js";
+import { safeArtifactMode } from "../node/fs-atomic.js";
 import {
   assertLocalAccess,
   resolveWorkspaceBoundary,

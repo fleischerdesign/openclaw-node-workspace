@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Drives the real Control UI in headless Chromium and verifies the native
-// session-header accessory against a live node_workspace_push.
+// session-header accessory against a live node_workspace_sync.
 //
 // The page is the same Control UI a user opens; the message is typed into the
 // same composer. The accessory is a native plugin contribution, so this also
@@ -31,12 +31,12 @@ if (!chromiumPath) {
 
 const prompt =
   process.env.PROGRESS_PROMPT ??
-  "Publish the progress fixture directory to the progress-node with node_workspace_push. Do not do anything else.";
+  "Sync the progress fixture directory to the progress-node with node_workspace_sync. Do not do anything else.";
 const reconnect = process.env.PROGRESS_RECONNECT === "1";
 const doneToken = process.env.PROGRESS_DONE_TOKEN;
 const globalDeadlineMs = Number(process.env.PROGRESS_TIMEOUT_MS ?? 240_000);
 
-const progressLine = /Node workspace (scanning|sending|publishing):\s*(?:(\d+)\/(\d+) files,\s*)?([\d.]+) MiB/u;
+const progressLine = /Node workspace (scanning|sending|applying):\s*(?:(\d+)\/(\d+) files,\s*)?([\d.]+) MiB/u;
 const counterLine = /(\d+)\/(\d+)/u;
 
 const consoleErrors = [];

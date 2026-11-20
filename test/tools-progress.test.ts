@@ -20,7 +20,7 @@ async function workspace(files: Record<string, string>): Promise<string> {
   return root;
 }
 
-test("push onUpdate carries channel-visible progress with rising counters", async () => {
+test("sync onUpdate carries channel-visible progress with rising counters", async () => {
   const sourceRoot = await workspace({
     "a.bin": "a".repeat(40_000),
     "b.bin": "b".repeat(40_000),
@@ -52,7 +52,7 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
   const progress = new TransferProgressStore();
   const scope = { sessionKey: "agent:main:progress", agentId: "main" };
   let notifications = 0;
-  const pushTool = createTools({
+  const tools = createTools({
     transport: harness.transport,
     config: config.gateway,
     configError: undefined,
@@ -60,18 +60,30 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
     scope,
     progress,
     onProgressChange: () => (notifications += 1),
-  }).find(
-    (tool) => tool.name === "node_workspace_push",
-  );
-  assert.ok(pushTool);
+  });
+  const syncTool = tools.find((tool) => tool.name === "node_workspace_sync");
+  assert.ok(syncTool);
+  const remotePath = path.join(destinationRoot, "target");
+
+  const plan = await syncTool.execute("call-plan", {
+    node: "Node One",
+    localPath: sourceRoot,
+    remotePath,
+    mode: "preview",
+    create: true,
+  });
+  assert.equal(plan.details.ok, true);
 
   const updates: AgentUpdate[] = [];
-  const result = await pushTool.execute(
+  const result = await syncTool.execute(
     "call-progress",
     {
       node: "Node One",
       localPath: sourceRoot,
-      remotePath: path.join(destinationRoot, "target"),
+      remotePath,
+      create: true,
+      planDigest: plan.details.planDigest,
+      operationId: "a".repeat(32),
     },
     undefined,
     (update) => updates.push(update),
@@ -84,22 +96,16 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
   for (const update of updates) {
     assert.equal(update.progress?.visibility, "channel");
     assert.equal(update.progress?.privacy, "public");
-    assert.equal(update.progress?.id, "node-workspace-push");
+    assert.equal(update.progress?.id, "node-workspace-sync");
     assert.equal(update.content[0]?.type, "text");
     assert.equal(update.content[0]?.text, update.progress?.text);
-    assert.match(update.progress?.text ?? "", /^Node workspace (scanning|sending|publishing): /u);
+    assert.match(update.progress?.text ?? "", /^Node workspace (scanning|sending|applying): /u);
     if (update.progress?.text.includes("sending: ")) sends.push(update.progress.text);
   }
 
-  assert.ok(
-    updates.some((update) => update.progress?.text.includes("scanning")),
-    "no scanning update",
-  );
+  assert.ok(updates.some((update) => update.progress?.text.includes("scanning")), "no scanning update");
   assert.ok(sends.length > 0, "no sending update");
-  assert.ok(
-    updates.some((update) => update.progress?.text.includes("publishing")),
-    "no publishing update",
-  );
+  assert.ok(updates.some((update) => update.progress?.text.includes("applying")), "no applying update");
 
   const parsed = sends.map((text) => {
     const match = /sending: (\d+)\/(\d+) files, ([\d.]+) MiB/u.exec(text);
@@ -108,28 +114,31 @@ test("push onUpdate carries channel-visible progress with rising counters", asyn
   });
   assert.ok(notifications > 0, "no progress notification was emitted");
   const snapshot = progress.snapshot(scope);
-  assert.equal(snapshot.length, 1);
+  assert.equal(snapshot.length, 2, "the preview and the apply are separate transfers");
   assert.equal(snapshot[0]?.state, "completed");
-  assert.equal(snapshot[0]?.filesTotal, 2);
-  assert.equal(snapshot[0]?.filesDone, 2);
-  assert.equal(snapshot[0]?.bytesTotal, 80_000);
+  assert.equal(snapshot[1]?.state, "completed");
+  assert.equal(snapshot[1]?.filesTotal, 2);
+  assert.equal(snapshot[1]?.filesDone, 2);
+  assert.equal(snapshot[1]?.bytesTotal, 80_000);
 
-  assert.ok(parsed.every((entry) => entry.total === 2), "file total changed during the push");
+  assert.ok(parsed.every((entry) => entry.total === 2), "file total changed during the sync");
 
-  // A rejected second publish is a measured failure, not a fake completion.
+  // A stale pinned preview is a measured failure, not a fake completion.
   await fs.appendFile(path.join(sourceRoot, "a.bin"), "changed");
-  const conflict = await pushTool.execute("call-conflict", {
+  const stale = await syncTool.execute("call-stale", {
     node: "Node One",
     localPath: sourceRoot,
-    remotePath: path.join(destinationRoot, "target"),
+    remotePath,
+    operationId: "b".repeat(32),
+    planDigest: "0".repeat(64),
   });
-  assert.equal(conflict.details.ok, false);
-  const afterConflict = progress.snapshot(scope);
-  assert.equal(afterConflict.length, 2);
-  assert.equal(afterConflict[1]?.state, "failed");
-  assert.equal(afterConflict[1]?.reasonCode, "destination-exists");
-  assert.ok(!("localPath" in afterConflict[1]!));
-  assert.ok(!("remotePath" in afterConflict[1]!));
+  assert.equal(stale.details.ok, false);
+  const afterStale = progress.snapshot(scope);
+  assert.equal(afterStale.length, 3);
+  assert.equal(afterStale[2]?.state, "failed");
+  assert.equal(afterStale[2]?.reasonCode, "plan-stale");
+  assert.ok(!("localPath" in afterStale[2]!));
+  assert.ok(!("remotePath" in afterStale[2]!));
   for (let index = 1; index < parsed.length; index += 1) {
     assert.ok(parsed[index].files >= parsed[index - 1].files, "file counter went backwards");
     assert.ok(parsed[index].mib >= parsed[index - 1].mib, "byte counter went backwards");

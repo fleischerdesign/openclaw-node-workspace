@@ -1,7 +1,7 @@
 {
   "name": "@fleischerdesign/openclaw-node-workspace",
   "version": "0.1.0",
-  "description": "Publish an explicitly selected workspace from an OpenClaw Gateway to a paired node, and retrieve selected artifacts back.",
+  "description": "Keep one durable managed source workspace on a paired OpenClaw node: sync in place, preserve build caches, protect secrets, and fetch selected artifacts back.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -51,8 +51,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/*.test.ts\"",
     "check": "npm run build && npm test",
-    "pack:inspect": "bash scripts/pack-and-inspect.sh",
-    "bench:push": "node --import tsx scripts/bench-push.mjs"
+    "pack:inspect": "bash scripts/pack-and-inspect.sh"
   },
   "repository": {
     "type": "git",

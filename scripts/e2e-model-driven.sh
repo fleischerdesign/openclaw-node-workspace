@@ -167,7 +167,7 @@ const gateway = {
     auth: { mode: "none" },
     nodes: {
       pairing: { autoApproveCidrs: [] },
-      commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] },
+      commands: { allow: ["nodews.sync", "nodews.fetch", "nodews.status"] },
     },
   },
   models: {
@@ -265,7 +265,7 @@ echo "gateway listening on $PORT"
 
 stage "start node host with the system.run surface advertised"
 setsid "$WORK/isolated" node openclaw node run --host 127.0.0.1 --port "$PORT" --no-tls --display-name "e2e-node" \
-  --commands nodews.push,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
+  --commands nodews.sync,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
 NODE_PID=$!
 
 stage "wait for pairing and approve the declared surface"
@@ -296,7 +296,7 @@ node - "$WORK/tools.json" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const names = JSON.stringify(report);
-for (const tool of ["node_workspace_push", "node_workspace_artifact", "node_workspace_status"]) {
+for (const tool of ["node_workspace_sync", "node_workspace_artifact", "node_workspace_status"]) {
   if (!names.includes(tool)) throw new Error(`plugin tool ${tool} is not registered on the gateway`);
 }
 console.log("plugin tools registered on the gateway");
@@ -325,19 +325,21 @@ const trace = fs
 
 const decisions = trace.map((entry) => entry.decision);
 const tools = decisions.filter((decision) => decision.tool).map((decision) => decision.tool);
-if (tools.length < 3) throw new Error(`expected at least 3 tool calls from the model, saw ${tools.length}: ${tools.join(", ")}`);
-if (tools[0] !== "node_workspace_push") throw new Error(`first model tool call was ${tools[0]}, expected node_workspace_push`);
-if (tools[1] !== "exec") throw new Error(`second model tool call was ${tools[1]}, expected exec`);
-if (tools[2] !== "node_workspace_artifact") throw new Error(`third model tool call was ${tools[2]}, expected node_workspace_artifact`);
+if (tools.length < 4) throw new Error(`expected at least 4 tool calls from the model, saw ${tools.length}: ${tools.join(", ")}`);
+if (tools[0] !== "node_workspace_sync" || tools[1] !== "node_workspace_sync") throw new Error(`model did not preview then apply: ${tools.join(", ")}`);
+if (tools[2] !== "exec") throw new Error(`third model tool call was ${tools[2]}, expected exec`);
+if (tools[3] !== "node_workspace_artifact") throw new Error(`fourth model tool call was ${tools[3]}, expected node_workspace_artifact`);
 
 const execCall = decisions.find((decision) => decision.tool === "exec");
 if (execCall.args.host !== "node") throw new Error(`exec did not target the node: ${JSON.stringify(execCall.args)}`);
 if (execCall.args.workdir !== remoteDir) throw new Error(`exec workdir ${execCall.args.workdir} != pushed cwd ${remoteDir}`);
 
 const toolPreviews = trace.flatMap((entry) => entry.toolMessages ?? []).map((message) => message.preview);
-const pushPreview = toolPreviews.find((text) => text.startsWith("published:"));
-if (!pushPreview) throw new Error("no successful node_workspace_push result reached the model");
-if (!pushPreview.includes(`on node `)) throw new Error("push result did not name the node");
+const plannedPreview = toolPreviews.find((text) => text.startsWith("planned:"));
+if (!plannedPreview) throw new Error("no preview result reached the model");
+const applyPreview = toolPreviews.find((text) => text.startsWith("applied:"));
+if (!applyPreview) throw new Error("no applied sync result reached the model");
+if (!applyPreview.includes(`on node `)) throw new Error("sync result did not name the node");
 
 const execPreview = toolPreviews.find((text) => text.includes("hello from the gateway workspace"));
 if (!execPreview) throw new Error("exec result with node stdout did not reach the model");
@@ -357,7 +359,7 @@ if (!artifactPreview.includes(digest)) throw new Error("artifact tool result doe
 
 const agent = JSON.parse(fs.readFileSync(path.join(work, "agent.json"), "utf8"));
 const summary = agent.result?.meta?.toolSummary;
-if (!summary || summary.calls < 3) throw new Error(`agent reported ${summary?.calls ?? 0} tool calls, expected at least 3`);
+if (!summary || summary.calls < 4) throw new Error(`agent reported ${summary?.calls ?? 0} tool calls, expected at least 4`);
 if (summary.failures !== 0) throw new Error(`agent reported ${summary.failures} tool failures`);
 const finalText = agent.result?.meta?.finalAssistantMessageRawText ?? "";
 if (!finalText.includes("E2E complete")) throw new Error(`unexpected final assistant text: ${JSON.stringify(finalText.slice(0, 200))}`);

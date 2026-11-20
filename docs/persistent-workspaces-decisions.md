@@ -1,8 +1,11 @@
 # Persistent source workspaces: consolidated decisions
 
-Status: design only, 2026-11-20. This is the authoritative decision record for the accompanying
+Status: 2026-11-20. This is the authoritative decision record for the accompanying
 persistent-workspaces-proposal.md exploration. Where they differ, this record supersedes it.
-No runtime implementation, tests or benchmarks are included.
+The first release described here is implemented in `src/`; gates 1-3 have executable tests and
+isolated scripts, gate 4 is exercised by the real node canary during acceptance, and gate 5
+(indexed verification, managed return, lifecycle cleanup, alternate delta backends, benchmarks)
+remains open. Treat the implementation notes in the other docs as current.
 
 ## Recommended first release
 

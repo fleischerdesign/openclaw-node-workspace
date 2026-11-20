@@ -7,7 +7,7 @@
 #   - the real Control UI in headless Chromium, the real composer, the real
 #     agent loop and tool dispatch, the real duplex node transport and files;
 #   - the scripted OpenAI-compatible endpoint, which only decides to call
-#     node_workspace_push and then answers.
+#     node_workspace_sync and then answers.
 #
 # The fixture is large and the chunk size is small on purpose: the push runs for
 # many seconds, so the driver can screenshot the Control UI while the transfer
@@ -211,7 +211,7 @@ const gateway = {
     },
     nodes: {
       pairing: { autoApproveCidrs: [] },
-      commands: { allow: ["nodews.push", "nodews.fetch", "nodews.status"] },
+      commands: { allow: ["nodews.sync", "nodews.fetch", "nodews.status"] },
     },
   },
   models: {
@@ -306,7 +306,7 @@ echo "gateway listening on $PORT"
 
 stage "start node host"
 setsid "$WORK/isolated" node openclaw node run --host 127.0.0.1 --port "$PORT" --no-tls --display-name "progress-node" \
-  --commands nodews.push,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
+  --commands nodews.sync,nodews.fetch,nodews.status,system.run,system.run.prepare >"$WORK/node.log" 2>&1 &
 NODE_PID=$!
 
 stage "wait for pairing and approve the node"
@@ -337,7 +337,7 @@ node - "$WORK/tools.json" <<'NODE'
 const fs = require("node:fs");
 const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const names = JSON.stringify(report);
-for (const tool of ["node_workspace_push", "node_workspace_artifact", "node_workspace_status"]) {
+for (const tool of ["node_workspace_sync", "node_workspace_artifact", "node_workspace_status"]) {
   if (!names.includes(tool)) throw new Error(`plugin tool ${tool} is not registered on the gateway`);
 }
 console.log("plugin tools registered on the gateway");
@@ -351,7 +351,7 @@ PROGRESS_CAPTURE_ALL=1 \
 PROGRESS_CAPTURE_WS=1 \
 PROGRESS_RECONNECT=1 \
 PROGRESS_DONE_TOKEN="$REMOTE_DIR" \
-PROGRESS_PROMPT="Publish the progress fixture directory to the progress-node with node_workspace_push. Do not do anything else." \
+PROGRESS_PROMPT="Sync the progress fixture directory to the progress-node with node_workspace_sync. Do not do anything else." \
   node "$ROOT/scripts/progress-driver.mjs" "$PORT" "$EVIDENCE" "$WORK/ui-ready" >"$WORK/driver.log" 2>&1 &
 DRIVER_PID=$!
 for _ in $(seq 1 300); do
@@ -387,8 +387,8 @@ const trace = fs
   .split("\n")
   .map((line) => JSON.parse(line))
   .filter((entry) => entry.kind === "request");
-if (!trace.some((entry) => entry.decision?.tool === "node_workspace_push")) {
-  throw new Error("the scripted model never requested node_workspace_push");
+if (!trace.some((entry) => entry.decision?.tool === "node_workspace_sync")) {
+  throw new Error("the scripted model never requested node_workspace_sync");
 }
 
 const report = JSON.parse(fs.readFileSync(path.join(evidence, "report.json"), "utf8"));
@@ -412,5 +412,5 @@ console.log(
 );
 NODE
 
-echo "PASS: the Control UI showed live node_workspace_push progress while the transfer was running"
+echo "PASS: the Control UI showed live node_workspace_sync progress while the transfer was running"
 echo "EVIDENCE: $EVIDENCE"

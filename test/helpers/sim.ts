@@ -79,7 +79,11 @@ export interface Harness {
  * It runs the real node command handlers over a real ordered channel; only the
  * network hop is replaced. That is the level the plugin owns.
  */
-export function createHarness(commands: readonly NodeHostCommand[], faults: Faults = {}): Harness {
+export function createHarness(
+  commands: readonly NodeHostCommand[],
+  faults: Faults = {},
+  nodeContext: { readonly agentId?: string; readonly sessionKey?: string } = {},
+): Harness {
   const opens: string[] = [];
   const nodeErrors: Error[] = [];
 
@@ -136,7 +140,7 @@ export function createHarness(commands: readonly NodeHostCommand[], faults: Faul
         signal: controller.signal,
       };
       const params = request.params === undefined ? null : JSON.stringify(request.params);
-      void Promise.resolve(command.handle(params, io, {}))
+      void Promise.resolve(command.handle(params, io, nodeContext))
         .catch((error: unknown) => {
           nodeErrors.push(error instanceof Error ? error : new Error(String(error)));
         })
@@ -152,7 +156,7 @@ export function createHarness(commands: readonly NodeHostCommand[], faults: Faul
       const command = commands.find((entry) => entry.command === request.command);
       if (!command) throw new Error(`unknown command ${request.command}`);
       opens.push(request.command);
-      return await command.handle(request.params === undefined ? null : JSON.stringify(request.params), undefined, {});
+      return await command.handle(request.params === undefined ? null : JSON.stringify(request.params), undefined, nodeContext);
     },
 
     async listNodes() {

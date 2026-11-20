@@ -1,17 +1,15 @@
 {
   "id": "node-workspace",
   "name": "Node Workspace",
-  "description": "Publish an explicitly selected workspace from an OpenClaw Gateway to a paired node, incrementally reuse unchanged files, and return changed or generated project files with a preview.",
+  "description": "Keep one durable managed source workspace on a paired node: sync in place, preserve build caches, protect secrets, and fetch selected artifacts back.",
   "categories": [
     "developer-tools"
   ],
   "contracts": {
     "tools": [
-      "node_workspace_push",
+      "node_workspace_sync",
       "node_workspace_artifact",
-      "node_workspace_status",
-      "node_workspace_changes",
-      "node_workspace_return"
+      "node_workspace_status"
     ]
   },
   "activation": {
@@ -39,19 +37,6 @@
             },
             "description": "Optional. Narrows an artifact destination beyond the session workspace; empty means no additional restriction."
           },
-          "exclude": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "symlinks": {
-            "type": "string",
-            "enum": [
-              "reject",
-              "skip"
-            ]
-          },
           "maxFiles": {
             "type": "integer",
             "minimum": 1
@@ -75,13 +60,6 @@
           "timeoutMs": {
             "type": "integer",
             "minimum": 1000
-          },
-          "returnRoots": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Optional. Narrows a return target beyond the session workspace; empty means no additional restriction."
           }
         }
       },
@@ -116,19 +94,13 @@
           "maxArtifactBytes": {
             "type": "integer",
             "minimum": 1
-          },
-          "returnRoots": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         }
       }
     }
   },
   "controlUi": {
-    "entry": "dist/control-ui/813880342f3387e28f5b6323cb120cef2b597861044ddc00a20c694195d2abe9/index.js",
+    "entry": "dist/control-ui/9fe0dbb7db35dd3a400b53a2064d4ce789b449afff156e26d4f70aac9c89ffb2/index.js",
     "styles": []
   }
 }

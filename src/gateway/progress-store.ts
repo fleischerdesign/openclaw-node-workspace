@@ -1,8 +1,7 @@
-import type { PushProgress } from "./push.js";
-import type { ReturnProgress } from "./return.js";
+import type { SyncProgress } from "./sync.js";
 
-export type TransferKind = "push" | "fetch" | "return";
-export type TransferPhase = PushProgress["phase"] | ReturnProgress["phase"] | "fetching";
+export type TransferKind = "sync" | "fetch";
+export type TransferPhase = SyncProgress["phase"] | "fetching";
 export type TransferState = "running" | "completed" | "failed" | "unknown" | "cancelled";
 
 export interface TransferScope {
@@ -85,17 +84,7 @@ export class TransferProgressStore {
     Object.assign(entry, patch, { updatedAt: this.#clock() });
   }
 
-  updateFromPush(scope: TransferScope, transferId: string, progress: PushProgress): void {
-    this.update(scope, transferId, {
-      phase: progress.phase,
-      filesDone: progress.filesDone,
-      filesTotal: progress.filesTotal,
-      bytesDone: progress.bytesDone,
-      bytesTotal: progress.bytesTotal,
-    });
-  }
-
-  updateReturn(scope: TransferScope, transferId: string, progress: ReturnProgress): void {
+  updateFromSync(scope: TransferScope, transferId: string, progress: SyncProgress): void {
     this.update(scope, transferId, {
       phase: progress.phase,
       filesDone: progress.filesDone,
@@ -129,8 +118,6 @@ export class TransferProgressStore {
     entry.finishedAt = now;
     if (reasonCode) entry.reasonCode = reasonCode;
     if (state === "completed" && entry.filesTotal === 0) {
-      // A completed snapshot with no counters is still useful as a terminal
-      // signal, but must not claim a file count it never measured.
       entry.filesDone = 0;
     }
   }
@@ -176,8 +163,7 @@ export class TransferProgressStore {
     for (let index = 0; index < excess; index += 1) {
       const candidate = ordered[index];
       if (!candidate) break;
-      const terminal = candidate.state !== "running";
-      if (terminal) entries.delete(candidate.transferId);
+      if (candidate.state !== "running") entries.delete(candidate.transferId);
     }
     if (entries.size > MAX_TRANSFERS_PER_SCOPE) {
       const oldest = [...entries.values()].sort((left, right) => left.startedAt - right.startedAt)[0];

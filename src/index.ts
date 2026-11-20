@@ -12,10 +12,8 @@ import { resolveToolWorkspace } from "./gateway/workspace-root.js";
 import { createNodeCommands } from "./node/commands.js";
 import {
   COMMAND_FETCH,
-  COMMAND_PUSH,
-  COMMAND_RETURN,
   COMMAND_STATUS,
-  COMMAND_TREE,
+  COMMAND_SYNC,
 } from "./protocol.js";
 
 const PLUGIN_ID = "node-workspace";
@@ -143,11 +141,9 @@ export default definePluginEntry({
       });
     }, {
       names: [
-        "node_workspace_push",
+        "node_workspace_sync",
         "node_workspace_artifact",
         "node_workspace_status",
-        "node_workspace_changes",
-        "node_workspace_return",
       ],
       workspaceAccess: false,
     });
@@ -158,7 +154,7 @@ export default definePluginEntry({
     }
 
     api.registerNodeInvokePolicy({
-      commands: [COMMAND_PUSH, COMMAND_FETCH, COMMAND_STATUS, COMMAND_TREE, COMMAND_RETURN],
+      commands: [COMMAND_SYNC, COMMAND_FETCH, COMMAND_STATUS],
       dangerous: true,
       handle: (context) => context.invokeNode(),
     });

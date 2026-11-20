@@ -6,17 +6,6 @@ export function sha256Hex(bytes: Uint8Array | string): Hex {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/**
- * Idempotency key for one content-addressed publish.
- *
- * The same bytes to the same destination derive the same id, so a caller that
- * retries after an unknown outcome gets `already-applied` instead of a second
- * copy. Different content at an occupied destination is a conflict.
- */
-export function derivePushId(nodeId: string, remotePath: string, digest: Hex): Hex {
-  return sha256Hex(`${nodeId}\n${remotePath}\n${digest}`).slice(0, 32);
-}
-
 export interface ManifestEntry {
   /** POSIX path relative to the published root. */
   readonly path: string;

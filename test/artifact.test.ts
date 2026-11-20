@@ -8,9 +8,7 @@ import test from "node:test";
 import { resolvePluginConfig } from "../src/config.js";
 import { NodeWorkspaceError } from "../src/errors.js";
 import { fetchArtifact } from "../src/gateway/artifact.js";
-import { workspaceStatus } from "../src/gateway/status.js";
 import { createNodeCommands } from "../src/node/commands.js";
-import { pushWorkspace } from "../src/gateway/push.js";
 import { createHarness, type Faults } from "./helpers/sim.js";
 
 async function setup(options: { nodeBytes?: number; fault?: Faults } = {}) {
@@ -170,42 +168,6 @@ test("artifact size limit is enforced on both sides", async () => {
   assert.deepEqual(await fs.readdir(gatewayRoot), []);
 });
 
-test("status distinguishes absent, foreign and plugin-owned destinations", async () => {
-  const { nodeRoot, gatewayRoot, config, harness } = await setup();
-  await fs.writeFile(path.join(gatewayRoot, "a.txt"), "alpha");
-
-  const absent = await workspaceStatus(harness.transport, config.gateway, {
-    node: "node-1",
-    remotePath: path.join(nodeRoot, "absent"),
-  });
-  assert.equal(absent.exists, false);
-  assert.equal(absent.parentExists, true);
-
-  await fs.mkdir(path.join(nodeRoot, "foreign"));
-  const foreign = await workspaceStatus(harness.transport, config.gateway, {
-    node: "node-1",
-    remotePath: path.join(nodeRoot, "foreign"),
-  });
-  assert.equal(foreign.exists, true);
-  assert.equal(foreign.owned, false);
-
-  const pushed = await pushWorkspace(harness.transport, config.gateway, {
-    node: "node-1",
-    localPath: gatewayRoot,
-    workspaceRoot: gatewayRoot,
-    remotePath: path.join(nodeRoot, "owned"),
-    exclude: undefined,
-    signal: undefined,
-    progress: undefined,
-  });
-  const owned = await workspaceStatus(harness.transport, config.gateway, {
-    node: "node-1",
-    remotePath: path.join(nodeRoot, "owned"),
-  });
-  assert.equal(owned.owned, true);
-  assert.equal(owned.marker?.pushId, pushed.pushId);
-});
-
 test("a remote 0777 artifact becomes owner-only on the Gateway", async () => {
   const { nodeRoot, gatewayRoot, config, harness } = await setup();
   const source = path.join(nodeRoot, "tool.sh");
@@ -277,51 +239,6 @@ test("a non-executable remote artifact stays 0600", async () => {
   assert.equal(outcome.mode, 0o600);
 });
 
-test("status reports verified content and drift after modification", async () => {
-  const { nodeRoot, gatewayRoot, config, harness } = await setup();
-  await fs.writeFile(path.join(gatewayRoot, "a.txt"), "alpha");
-  const remotePath = path.join(nodeRoot, "app");
-  await pushWorkspace(harness.transport, config.gateway, {
-    node: "node-1",
-    localPath: gatewayRoot,
-    workspaceRoot: gatewayRoot,
-    remotePath,
-    exclude: undefined,
-    signal: undefined,
-    progress: undefined,
-  });
-  const clean = await workspaceStatus(harness.transport, config.gateway, { node: "node-1", remotePath });
-  assert.equal(clean.owned, true);
-  assert.equal(clean.verified, true);
-  assert.equal(clean.drift, null);
-
-  await fs.writeFile(path.join(remotePath, "a.txt"), "changed on node");
-  const drifted = await workspaceStatus(harness.transport, config.gateway, { node: "node-1", remotePath });
-  assert.equal(drifted.owned, true);
-  assert.equal(drifted.verified, false);
-  assert.match(drifted.drift ?? "", /differs/);
-});
-
-test("status reports parentExists only for allowed paths", async () => {
-  const { nodeRoot, config, harness } = await setup();
-  const missing = await workspaceStatus(harness.transport, config.gateway, {
-    node: "node-1",
-    remotePath: path.join(nodeRoot, "missing", "child"),
-  });
-  assert.equal(missing.exists, false);
-  assert.equal(missing.parentExists, false);
-
-  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-status-out-"));
-  await assert.rejects(
-    () =>
-      workspaceStatus(harness.transport, config.gateway, {
-        node: "node-1",
-        remotePath: path.join(outside, "x"),
-      }),
-    (error: unknown) => error instanceof NodeWorkspaceError && error.code === "path-outside-root",
-  );
-});
-
 test("a stalled artifact transfer stops at the absolute deadline", async () => {
   const gatewayRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-deadline-"));
   const config = resolvePluginConfig({
@@ -366,28 +283,4 @@ test("a stalled artifact transfer stops at the absolute deadline", async () => {
     (error: unknown) => error instanceof NodeWorkspaceError && error.code === "timeout",
   );
   assert.ok(Date.now() - started < 4000);
-});
-
-test("status unwraps the node-invoke envelope", async () => {
-  const gatewayRoot = await fs.mkdtemp(path.join(os.tmpdir(), "nodews-envelope-"));
-  const config = resolvePluginConfig({ gateway: { artifactRoots: [gatewayRoot] }, node: {} });
-  const transport = {
-    async openDuplex() {
-      throw new Error("unused");
-    },
-    async invoke() {
-      return {
-        ok: true,
-        payloadJSON: JSON.stringify({ exists: true, parentExists: true, owned: false, verified: false }),
-      };
-    },
-    async listNodes() {
-      return [{ nodeId: "node-1", displayName: "Node One" }];
-    },
-  };
-  const status = await workspaceStatus(transport, config.gateway, { node: "node-1", remotePath: "/srv/app" });
-  assert.equal(status.exists, true);
-  assert.equal(status.parentExists, true);
-  assert.equal(status.owned, false);
-  assert.equal(status.verified, false);
 });

@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { NodeWorkspaceError } from "../src/errors.js";
 import {
-  MARKER_FILE,
   assertDestinationName,
   assertSafeRelativePath,
   isWithin,
@@ -29,7 +28,7 @@ test("isWithin respects component boundaries", () => {
 });
 
 test("assertSafeRelativePath rejects traversal, absolute paths, backslashes, and the marker", () => {
-  for (const value of ["../escape", "a/../../escape", "/etc/passwd", "a\\b", "", "a//b", "./a", MARKER_FILE]) {
+  for (const value of ["../escape", "a/../../escape", "/etc/passwd", "a\\b", "", "a//b", "./a"]) {
     assert.throws(() => assertSafeRelativePath(value), NodeWorkspaceError);
   }
   assert.equal(assertSafeRelativePath("a/b.txt"), "a/b.txt");

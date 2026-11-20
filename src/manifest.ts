@@ -1,111 +1,71 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { minimatch } from "minimatch";
-
 import type { ManifestEntry } from "./digest.js";
-import { sortEntries, treeDigest } from "./digest.js";
+import { comparePaths, sortEntries, treeDigest } from "./digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "./errors.js";
-import { MAX_MARKER_BYTES, assertSafeRelativePath, normalizeAbsolutePosixPath } from "./paths.js";
-import type { SymlinkPolicy } from "./config.js";
-import type { PushHello } from "./protocol.js";
+import { hashRegularFile } from "./file-hash.js";
+import { assertSafeRelativePath } from "./paths.js";
+import { isExcluded, isProtected, isSelected, type ResolvedPolicy } from "./policy.js";
 
-export interface ScanRequest {
-  readonly root: string;
-  readonly exclude: readonly string[];
-  readonly symlinks: SymlinkPolicy;
+export interface ScanLimits {
   readonly maxFiles: number;
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
-  readonly signal?: AbortSignal | undefined;
-  readonly deadline?: number | undefined;
 }
 
 export interface SkippedEntry {
   readonly path: string;
-  readonly reason: "symlink" | "excluded";
+  readonly reason: "cache" | "protected" | "unselected";
 }
 
-export interface ScanResult {
+export interface SourceScan {
   readonly root: string;
   readonly files: readonly ManifestEntry[];
   readonly directories: readonly string[];
   readonly totalBytes: number;
   readonly treeDigest: string;
   readonly skipped: readonly SkippedEntry[];
+  readonly excluded: number;
+  readonly protectedCount: number;
 }
 
-function checkAborted(signal: AbortSignal | undefined, deadline?: number): void {
+export interface ScanRequest {
+  readonly root: string;
+  readonly policy: ResolvedPolicy;
+  readonly limits: ScanLimits;
+  readonly signal?: AbortSignal | undefined;
+  readonly deadline?: number | undefined;
+}
+
+function checkAborted(signal: AbortSignal | undefined, deadline: number | undefined): void {
   if (deadline !== undefined && Date.now() > deadline) {
-    throw new NodeWorkspaceError("timeout", "the scan exceeded the operation deadline");
+    throw new NodeWorkspaceError("timeout", "the local scan exceeded the operation deadline");
   }
   if (signal?.aborted) {
-    throw new NodeWorkspaceError("canceled", "the push was canceled before it finished scanning", {}, {
+    throw new NodeWorkspaceError("canceled", "the operation was canceled before scanning finished", {}, {
       cause: signal.reason,
     });
   }
 }
 
-function compileExcludes(patterns: readonly string[]): (relativePath: string) => boolean {
-  if (patterns.length === 0) return () => false;
-  const compiled = patterns.map((raw) => {
-    if (raw.includes("\0")) throw new NodeWorkspaceError("config-invalid", "exclude pattern contains a NUL byte");
-    const normalized = raw.replace(/^\.\//, "").replace(/\/+$/, "");
-    if (normalized.length === 0) throw new NodeWorkspaceError("config-invalid", "exclude pattern must not be empty");
-    return normalized;
-  });
-  return (relativePath) =>
-    compiled.some((pattern) => minimatch(relativePath, pattern, { dot: true }) || minimatch(relativePath, `${pattern}/**`, { dot: true }));
-}
-
-const SMALL_FILE_HASH_BYTES = 4 * 1024 * 1024;
-
-async function hashFile(absolutePath: string): Promise<{ size: number; sha256: string }> {
-  const before = await fs.lstat(absolutePath);
-  if (!before.isFile()) {
-    throw new NodeWorkspaceError("special-file-rejected", `not a regular file: ${absolutePath}`);
-  }
-  const hash = createHash("sha256");
-  let bytes = 0;
-  try {
-    if (before.size <= SMALL_FILE_HASH_BYTES) {
-      const content = await fs.readFile(absolutePath);
-      bytes = content.byteLength;
-      hash.update(content);
-    } else {
-      const stream = createReadStream(absolutePath);
-      for await (const chunk of stream) {
-        const buffer = chunk as Buffer;
-        bytes += buffer.byteLength;
-        hash.update(buffer);
-      }
-    }
-  } catch (error) {
-    throw new NodeWorkspaceError("io", `failed to read ${absolutePath}: ${errorMessage(error)}`, {}, { cause: error });
-  }
-  const after = await fs.lstat(absolutePath);
-  if (
-    after.size !== before.size ||
-    after.mtimeMs !== before.mtimeMs ||
-    after.ino !== before.ino ||
-    bytes !== before.size
-  ) {
-    throw new NodeWorkspaceError("io", `file changed while it was being read: ${absolutePath}`);
-  }
-  return { size: bytes, sha256: hash.digest("hex") };
+function ancestors(value: string): string[] {
+  const segments = value.split("/");
+  const result: string[] = [];
+  for (let index = 1; index < segments.length; index += 1) result.push(segments.slice(0, index).join("/"));
+  return result;
 }
 
 /**
- * Walk one selected directory without following links.
+ * Walk one selected local source tree.
  *
- * The scan is strict: a symlink, socket, or FIFO aborts it unless symlinks are
- * configured to be skipped. Silently following a link would publish a file the
- * caller did not select.
+ * Cache/dependency subtrees are skipped before `lstat`, so a warm workspace is
+ * never read for content. Protected paths are counted but not hashed and never
+ * sent. Source symlinks and special files are rejected: following them would
+ * publish something the caller did not select.
  */
-export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
-  const root = normalizeAbsolutePosixPath(request.root);
+export async function scanSource(request: ScanRequest): Promise<SourceScan> {
+  const root = path.resolve(request.root);
   let rootStat;
   try {
     rootStat = await fs.lstat(root);
@@ -120,15 +80,16 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
     throw new NodeWorkspaceError("not-a-directory", `the selected workspace is not a directory: ${root}`);
   }
 
-  const excluded = compileExcludes(request.exclude);
   const files: ManifestEntry[] = [];
   const directories: string[] = [];
   const skipped: SkippedEntry[] = [];
   let totalBytes = 0;
+  let excluded = 0;
+  let protectedCount = 0;
 
   const walk = async (relativeDir: string): Promise<void> => {
     checkAborted(request.signal, request.deadline);
-    const absoluteDir = relativeDir.length === 0 ? root : path.join(root, relativeDir);
+    const absoluteDir = relativeDir.length === 0 ? root : path.join(root, ...relativeDir.split("/"));
     let entries;
     try {
       entries = await fs.readdir(absoluteDir, { withFileTypes: true });
@@ -136,31 +97,31 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
       throw new NodeWorkspaceError("io", `cannot read ${absoluteDir}: ${errorMessage(error)}`, {}, { cause: error });
     }
     entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
-
     for (const entry of entries) {
       checkAborted(request.signal, request.deadline);
       const relativePath = relativeDir.length === 0 ? entry.name : `${relativeDir}/${entry.name}`;
-      const absolutePath = path.join(root, relativePath);
-      if (excluded(relativePath)) {
-        skipped.push({ path: relativePath, reason: "excluded" });
+      if (isExcluded(relativePath, request.policy)) {
+        excluded += 1;
+        skipped.push({ path: relativePath, reason: "cache" });
         continue;
       }
-
+      const absolutePath = path.join(root, ...relativePath.split("/"));
       const stat = await fs.lstat(absolutePath);
+      if (isProtected(relativePath, request.policy)) {
+        protectedCount += 1;
+        skipped.push({ path: relativePath, reason: "protected" });
+        continue;
+      }
       if (stat.isSymbolicLink()) {
-        if (request.symlinks === "skip") {
-          skipped.push({ path: relativePath, reason: "symlink" });
-          continue;
-        }
         throw new NodeWorkspaceError(
           "symlink-rejected",
-          `workspace contains a symlink at ${relativePath}; set gateway.symlinks to "skip" to omit links`,
+          `workspace contains a symlink at ${relativePath}; excluded dependency links must live in an excluded cache`,
         );
       }
       if (stat.isDirectory()) {
         assertSafeRelativePath(relativePath);
-        if (files.length + directories.length >= request.maxFiles) {
-          throw new NodeWorkspaceError("limit-exceeded", `workspace exceeds the ${request.maxFiles} entry limit`);
+        if (files.length + directories.length >= request.limits.maxFiles) {
+          throw new NodeWorkspaceError("limit-exceeded", `workspace exceeds the ${request.limits.maxFiles} entry limit`);
         }
         directories.push(relativePath);
         await walk(relativePath);
@@ -173,22 +134,26 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
         );
       }
       assertSafeRelativePath(relativePath);
-      if (stat.size > request.maxFileBytes) {
+      if (!isSelected(relativePath, request.policy)) {
+        skipped.push({ path: relativePath, reason: "unselected" });
+        continue;
+      }
+      if (stat.size > request.limits.maxFileBytes) {
         throw new NodeWorkspaceError(
           "limit-exceeded",
-          `${relativePath} is ${stat.size} bytes, above the per-file limit ${request.maxFileBytes}`,
+          `${relativePath} is ${stat.size} bytes, above the per-file limit ${request.limits.maxFileBytes}`,
         );
       }
-      if (files.length + directories.length >= request.maxFiles) {
-        throw new NodeWorkspaceError("limit-exceeded", `workspace exceeds the ${request.maxFiles} entry limit`);
+      if (files.length + directories.length >= request.limits.maxFiles) {
+        throw new NodeWorkspaceError("limit-exceeded", `workspace exceeds the ${request.limits.maxFiles} entry limit`);
       }
-      if (totalBytes + stat.size > request.maxTotalBytes) {
-        throw new NodeWorkspaceError("limit-exceeded", `workspace exceeds the ${request.maxTotalBytes} byte limit`);
+      if (totalBytes + stat.size > request.limits.maxTotalBytes) {
+        throw new NodeWorkspaceError(
+          "limit-exceeded",
+          `workspace exceeds the ${request.limits.maxTotalBytes} byte limit`,
+        );
       }
-      const hashed = await hashFile(absolutePath);
-      if (hashed.size !== stat.size) {
-        throw new NodeWorkspaceError("io", `file changed while it was being read: ${relativePath}`);
-      }
+      const hashed = await hashRegularFile(absolutePath);
       totalBytes += hashed.size;
       files.push({
         path: relativePath,
@@ -201,9 +166,14 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
 
   await walk("");
   const sortedFiles = sortEntries(files);
-  const sortedDirectories = [...directories].sort((left, right) =>
-    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
-  );
+  const neededDirectories = new Set<string>();
+  for (const entry of sortedFiles) {
+    for (const parent of ancestors(entry.path)) neededDirectories.add(parent);
+  }
+  for (const directory of directories) {
+    if (isSelected(directory, request.policy)) neededDirectories.add(directory);
+  }
+  const sortedDirectories = [...neededDirectories].sort(comparePaths);
   return {
     root,
     files: sortedFiles,
@@ -211,103 +181,7 @@ export async function scanWorkspace(request: ScanRequest): Promise<ScanResult> {
     totalBytes,
     treeDigest: treeDigest({ version: 1, files: sortedFiles, directories: sortedDirectories }),
     skipped,
+    excluded,
+    protectedCount,
   };
 }
-
-export interface ManifestLimits {
-  readonly maxFiles: number;
-  readonly maxFileBytes: number;
-  readonly maxTotalBytes: number;
-}
-
-/**
- * Validate a manifest received from the Gateway before anything is written.
- *
- * This is the node's independent check: it trusts no counts, no paths, and no
- * ordering from the other side.
- */
-export function validateManifestShape(hello: PushHello, limits: ManifestLimits): void {
-  if (!/^[0-9a-f]{16,64}$/.test(hello.pushId)) {
-    throw new NodeWorkspaceError("protocol", "pushId must be 16-64 lowercase hex characters");
-  }
-  if (!/^[0-9a-f]{64}$/.test(hello.treeDigest)) {
-    throw new NodeWorkspaceError("protocol", "treeDigest must be lowercase SHA-256 hex");
-  }
-  if (hello.manifest.length + hello.directories.length > limits.maxFiles) {
-    throw new NodeWorkspaceError("limit-exceeded", `manifest exceeds the node limit of ${limits.maxFiles} entries`);
-  }
-  normalizeAbsolutePosixPath(hello.remotePath);
-
-  const seen = new Set<string>();
-  const directorySet = new Set<string>();
-  for (const directory of hello.directories) {
-    assertSafeRelativePath(directory, "directory path");
-    if (seen.has(directory)) throw new NodeWorkspaceError("invalid-manifest", `duplicate path ${directory}`);
-    seen.add(directory);
-    directorySet.add(directory);
-  }
-
-  let totalBytes = 0;
-  for (const entry of hello.manifest) {
-    assertSafeRelativePath(entry.path);
-    if (seen.has(entry.path)) throw new NodeWorkspaceError("invalid-manifest", `duplicate path ${entry.path}`);
-    seen.add(entry.path);
-    if (entry.size > limits.maxFileBytes) {
-      throw new NodeWorkspaceError(
-        "limit-exceeded",
-        `${entry.path} is ${entry.size} bytes, above the node per-file limit ${limits.maxFileBytes}`,
-      );
-    }
-    totalBytes += entry.size;
-    if (totalBytes > limits.maxTotalBytes) {
-      throw new NodeWorkspaceError("limit-exceeded", `manifest exceeds the node byte limit ${limits.maxTotalBytes}`);
-    }
-  }
-  if (totalBytes !== hello.totalBytes) {
-    throw new NodeWorkspaceError("invalid-manifest", "hello.totalBytes does not match the manifest");
-  }
-  if (hello.reuse !== undefined) {
-    const files = new Set(hello.manifest.map((entry) => entry.path));
-    const seenReuse = new Set<string>();
-    for (const reusePath of hello.reuse) {
-      assertSafeRelativePath(reusePath, "reuse path");
-      if (!files.has(reusePath)) {
-        throw new NodeWorkspaceError("invalid-manifest", `reuse path is not a manifest file: ${reusePath}`);
-      }
-      if (seenReuse.has(reusePath)) {
-        throw new NodeWorkspaceError("invalid-manifest", `duplicate reuse path ${reusePath}`);
-      }
-      seenReuse.add(reusePath);
-    }
-  }
-  const markerBytes = Buffer.byteLength(
-    JSON.stringify({ manifest: hello.manifest, directories: hello.directories }),
-    "utf8",
-  );
-  if (markerBytes + 1024 > MAX_MARKER_BYTES) {
-    throw new NodeWorkspaceError("limit-exceeded", "manifest is too large for the node marker");
-  }
-
-  // Every declared directory must have its own parents declared too.
-  for (const directory of hello.directories) {
-    const segments = directory.split("/");
-    for (let index = 1; index < segments.length; index += 1) {
-      const prefix = segments.slice(0, index).join("/");
-      if (!directorySet.has(prefix)) {
-        throw new NodeWorkspaceError("invalid-manifest", `missing parent directory entry ${prefix} for ${directory}`);
-      }
-    }
-  }
-
-  // A file cannot also be a parent directory of another entry.
-  for (const entry of hello.manifest) {
-    const segments = entry.path.split("/");
-    for (let index = 1; index < segments.length; index += 1) {
-      const prefix = segments.slice(0, index).join("/");
-      if (!directorySet.has(prefix)) {
-        throw new NodeWorkspaceError("invalid-manifest", `missing parent directory entry ${prefix} for ${entry.path}`);
-      }
-    }
-  }
-}
-
