@@ -19,7 +19,7 @@ real files on disk. Only the network hop is a test double. It is one run, not a 
 | Fixture | 160 source files × 4096 B (655,360 B), one protected `.env` |
 | Cache | 2,048 dependency files × 16,384 B (33,554,432 B), installed on the node after creation |
 | Policy | preset `node` (excludes `node_modules`, `dist`, `.git`, common caches) |
-| Peak RSS | 99,656 KiB |
+| Peak RSS | 103,324 KiB |
 | Report | [2026-11-20-mob-nb-01.json](benchmarks/2026-11-20-mob-nb-01.json) |
 
 ## Results
@@ -28,15 +28,15 @@ All times are milliseconds. `transferred` is the wire payload reported by the sy
 
 | Scenario | Cache absent | Cache present (32 MiB) |
 | --- | ---: | ---: |
-| Cold preview | 119.13 | 90.41 |
-| Cold apply | 233.86 | 214.93 |
+| Cold preview | 183.78 | 139.01 |
+| Cold apply | 423.22 | 381.38 |
 | Cold transferred bytes | 654,570 | 654,570 |
-| No-op apply, single | 180.12 | 178.78 |
-| No-op apply, p50 of 5 | 167.48 | 166.36 |
+| No-op apply, single | 246.78 | 236.92 |
+| No-op apply, p50 of 5 | 231.09 | 229.50 |
 | No-op transferred bytes | 0 | 0 |
-| One-file update | 187.65 | 183.99 |
+| One-file update | 259.46 | 237.73 |
 | One-file transferred bytes | 4,090 | 4,090 |
-| Exact deletion apply | 183.84 | 173.59 |
+| Exact deletion apply | 247.69 | 242.17 |
 | Deletion transferred bytes | 0 | 0 |
 | Revision after deletion | 3 | 3 |
 | Protected paths reported | 1 | 1 |
@@ -56,9 +56,9 @@ All times are milliseconds. `transferred` is the wire payload reported by the sy
 | Property | Cache absent | Cache present |
 | --- | ---: | ---: |
 | Workspace bytes after deletion | 650,470 | 34,196,350 |
-| Registry + journal state bytes | 22,580 | 22,584 |
+| Registry + journal state bytes | 23,230 | 23,234 |
 | Sum of transferred payload plus deleted-backup bytes (upper bound) | 662,755 | 662,755 |
-| Filesystem free delta over the whole run | 2,697,472 B | 42,704,896 B |
+| Filesystem free delta over the whole run | 704,512 B | 42,704,896 B |
 
 The free-space delta includes installing the 32 MiB cache in the present run. `writeUpperBoundBytes`
 is a computed bound (transferred payload + retention of deleted bytes), not a sampled peak. Peak disk
@@ -71,9 +71,9 @@ A two-file TypeScript project was created and synced with policy `node`. `tsc --
 
 | Step | Result |
 | --- | --- |
-| Cold build | 701.09 ms |
-| No-op sync, then build | 294.66 ms |
-| One source edit, sync, then build | 310.88 ms |
+| Cold build | 724.65 ms |
+| No-op sync, then build | 302.36 ms |
+| One source edit, sync, then build | 315.08 ms |
 | `dist/` untouched by the no-op sync | 3 files checked, 0 changed |
 | `dist/` untouched by the edit sync | 3 files checked, 0 changed |
 | Edited output changed after rebuild | yes |
@@ -83,6 +83,18 @@ A two-file TypeScript project was created and synced with policy `node`. `tsc --
 The build times are a sanity check of cache preservation, not a performance target or a claim about
 larger projects. The no-op sync did not delete or rewrite `dist`, `.tsbuildinfo` or the dependency
 cache; the compiler could therefore reuse them.
+
+## Rust incremental smoke
+
+`rustc` is not installed on `mob-nb-01` (`command -v rustc` exits 1), so the optional no-crate
+`rustc -C incremental` smoke was skipped and recorded as `rust.available = false`. No crates or
+network access were added.
+
+## Re-measurement note
+
+These numbers were re-run after staged payload `sync()` was added before `close()` and before the
+`end`-frame unknown-outcome ordering fix. The cold apply is slower than the earlier run, as expected
+from the added durability work; no speed target is claimed.
 
 ## What this does and does not show
 

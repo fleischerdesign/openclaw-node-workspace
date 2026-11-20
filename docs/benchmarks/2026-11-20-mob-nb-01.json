@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T13:28:53.979Z",
+  "generatedAt": "2026-11-20T13:55:36.709Z",
   "environment": {
     "hostname": "mob-nb-01",
     "platform": "linux 6.18.58 x64",
@@ -9,7 +9,7 @@
     "sourceBytes": 4096,
     "cacheFiles": 2048,
     "cacheBytes": 16384,
-    "peakRssKb": 99656
+    "peakRssKb": 103324
   },
   "modes": {
     "absent": {
@@ -22,21 +22,21 @@
         "cacheBytes": 0
       },
       "cold": {
-        "previewMs": 119.13,
-        "applyMs": 233.86,
+        "previewMs": 183.78,
+        "applyMs": 423.22,
         "transferredBytes": 654570,
         "revision": 1
       },
       "noop": {
-        "ms": 180.12,
-        "p50Ms": 167.48,
-        "minMs": 166.13,
-        "maxMs": 180.12,
+        "ms": 246.78,
+        "p50Ms": 231.09,
+        "minMs": 227.29,
+        "maxMs": 246.78,
         "transferredBytes": 0,
         "revision": 1
       },
       "oneFileUpdate": {
-        "ms": 187.65,
+        "ms": 259.46,
         "transferredBytes": 4090,
         "counts": {
           "add": 0,
@@ -57,8 +57,8 @@
         }
       },
       "delete": {
-        "previewMs": 170.4,
-        "applyMs": 183.84,
+        "previewMs": 232.94,
+        "applyMs": 247.69,
         "transferredBytes": 0,
         "counts": {
           "add": 0,
@@ -89,13 +89,13 @@
         "changedPaths": []
       },
       "disk": {
-        "freeBeforeBytes": 524284383232,
-        "freeAfterColdBytes": 524283666432,
-        "freeAfterBytes": 524283678720,
+        "freeBeforeBytes": 519905644544,
+        "freeAfterColdBytes": 519904927744,
+        "freeAfterBytes": 519904940032,
         "workspaceBytes": 650470,
         "workspaceFiles": 159,
-        "stateAfterColdBytes": 22204,
-        "stateBytes": 22580,
+        "stateAfterColdBytes": 22436,
+        "stateBytes": 23230,
         "writeUpperBoundBytes": 662755
       },
       "status": {
@@ -134,21 +134,21 @@
         "cacheBytes": 33554432
       },
       "cold": {
-        "previewMs": 90.41,
-        "applyMs": 214.93,
+        "previewMs": 139.01,
+        "applyMs": 381.38,
         "transferredBytes": 654570,
         "revision": 1
       },
       "noop": {
-        "ms": 178.78,
-        "p50Ms": 166.36,
-        "minMs": 164.94,
-        "maxMs": 178.78,
+        "ms": 236.92,
+        "p50Ms": 229.5,
+        "minMs": 226.13,
+        "maxMs": 236.92,
         "transferredBytes": 0,
         "revision": 1
       },
       "oneFileUpdate": {
-        "ms": 183.99,
+        "ms": 237.73,
         "transferredBytes": 4090,
         "counts": {
           "add": 0,
@@ -169,8 +169,8 @@
         }
       },
       "delete": {
-        "previewMs": 170.79,
-        "applyMs": 173.59,
+        "previewMs": 219.32,
+        "applyMs": 242.17,
         "transferredBytes": 0,
         "counts": {
           "add": 0,
@@ -201,13 +201,13 @@
         "changedPaths": []
       },
       "disk": {
-        "freeBeforeBytes": 524241006592,
-        "freeAfterColdBytes": 524240289792,
-        "freeAfterBytes": 524198301696,
+        "freeBeforeBytes": 519862267904,
+        "freeAfterColdBytes": 519861551104,
+        "freeAfterBytes": 519819563008,
         "workspaceBytes": 34196350,
         "workspaceFiles": 2207,
-        "stateAfterColdBytes": 22208,
-        "stateBytes": 22584,
+        "stateAfterColdBytes": 22440,
+        "stateBytes": 23234,
         "writeUpperBoundBytes": 662755
       },
       "status": {
@@ -228,9 +228,9 @@
   },
   "build": {
     "compiler": "/home/philipp/.local/state/openclaw-node/workspace/nodews-check-20261120d/node_modules/.bin/tsc",
-    "coldBuildMs": 701.09,
-    "incrementalBuildMs": 294.66,
-    "editedBuildMs": 310.88,
+    "coldBuildMs": 724.65,
+    "incrementalBuildMs": 302.36,
+    "editedBuildMs": 315.08,
     "sync": {
       "noopStatus": "noop",
       "updateRevision": 2,
@@ -267,5 +267,8 @@
       "excluded": 1
     },
     "passed": true
+  },
+  "rust": {
+    "available": false
   }
 }

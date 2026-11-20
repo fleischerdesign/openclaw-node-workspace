@@ -299,6 +299,7 @@ async function runMode(mode, { cache }) {
     node: "node-1",
     remotePath,
     verify: true,
+    owner: { agentId: "bench", sessionKey: "agent:bench" },
   });
 
   // Repeat the no-op to report a small distribution without claiming a target.
@@ -375,6 +376,85 @@ function workspaceFiles(workspaceBytes, _stateAfterCold, _stateBytes) {
 
 function sumBefore(entries, kinds) {
   return entries.filter((entry) => kinds.includes(entry.kind)).reduce((total, entry) => total + (entry.before?.size ?? 0), 0);
+}
+
+function commandVersion(command) {
+  try {
+    return execFileSync(command, ["--version"], { encoding: "utf8", timeout: 10_000 }).trim();
+  } catch {
+    return null;
+  }
+}
+
+async function runRustSmoke() {
+  const compiler = commandVersion("rustc");
+  if (compiler === null) {
+    results.rust = { available: false };
+    return;
+  }
+  const sourceRoot = await fs.mkdtemp(path.join(ROOT, "rust-src-"));
+  await fs.mkdir(path.join(sourceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(sourceRoot, "src", "main.rs"), 'fn main() { println!("one"); }\n');
+  const nodeRoot = await fs.mkdtemp(path.join(ROOT, "rust-node-"));
+  const remotePath = path.join(nodeRoot, "app");
+  const config = configFor(sourceRoot, nodeRoot);
+  const harness = createHarness(createNodeCommands({
+    gateway: { localRoots: [sourceRoot], timeoutMs: 120_000 },
+    node: { pushRoots: [nodeRoot] },
+  }).commands);
+  const sync = (overrides = {}) =>
+    syncManaged(harness.transport, config.gateway, {
+      node: "node-1",
+      localPath: sourceRoot,
+      remotePath,
+      workspaceRoot: sourceRoot,
+      operationId: nextOp(),
+      mode: "apply",
+      create: true,
+      adopt: false,
+      adoptPaths: [],
+      restore: [],
+      rebind: false,
+      expectedRevision: undefined,
+      planDigest: undefined,
+      policy: { preset: "rust" },
+      owner: { agentId: "bench", sessionKey: "agent:bench" },
+      signal: undefined,
+      progress: undefined,
+      ...overrides,
+    });
+  const planned = await sync({ mode: "preview" });
+  await sync({ planDigest: planned.planDigest });
+  const build = () => {
+    const started = performance.now();
+    execFileSync(
+      "rustc",
+      ["--edition", "2021", "-C", "incremental=target/incremental", "-o", "target/app", "src/main.rs"],
+      { cwd: remotePath, stdio: "pipe", timeout: 120_000 },
+    );
+    return ms(started);
+  };
+  const coldBuildMs = build();
+  const targetBefore = await snapshot(remotePath, (relative) => relative.startsWith("target/"));
+  const noop = await sync();
+  const targetAfterSync = await snapshot(remotePath, (relative) => relative.startsWith("target/"));
+  const untouched = preservation(targetBefore, targetAfterSync);
+  await fs.writeFile(path.join(sourceRoot, "src", "main.rs"), 'fn main() { println!("two"); }\n');
+  const update = await sync();
+  const editedBuildMs = build();
+  const binary = await fs.readFile(path.join(remotePath, "target", "app"), "utf8").catch(() => null);
+  results.rust = {
+    available: true,
+    compiler,
+    coldBuildMs,
+    editedBuildMs,
+    noopStatus: noop.status,
+    updateRevision: update.revision,
+    targetUntouchedByNoopSync: untouched,
+    binaryContainsEditedText: binary !== null && binary.includes("two"),
+    passed: noop.status === "noop" && untouched.changed === 0 && update.revision === 2,
+  };
+  if (!results.rust.passed) throw new Error(`rust smoke failed: ${JSON.stringify(results.rust)}`);
 }
 
 async function runBuildSmoke() {
@@ -467,6 +547,7 @@ async function runBuildSmoke() {
     node: "node-1",
     remotePath,
     verify: true,
+    owner: { agentId: "bench", sessionKey: "agent:bench" },
   });
 
   results.build = {
@@ -495,6 +576,7 @@ try {
   await runMode("absent", { cache: false });
   await runMode("present", { cache: true });
   await runBuildSmoke();
+  await runRustSmoke();
   const body = `${JSON.stringify(results, null, 2)}\n`;
   if (OUT) await fs.writeFile(OUT, body);
   process.stdout.write(body);
