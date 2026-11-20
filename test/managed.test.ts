@@ -184,6 +184,7 @@ test("add, change, exact delete and mode change apply as one planned revision", 
     delete: 1,
     mode: 1,
     restore: 0,
+    adopt: 0,
     conflicts: 0,
     unchanged: 0,
     untracked: 0,
@@ -603,6 +604,32 @@ test("transport loss before end is not an unknown outcome; loss after the commit
     operationId: createdAfter.operationId,
   });
   assert.equal(status.value.owned, true);
+});
+
+test("adopting an existing unmanaged directory needs a pinned preview and records the base", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  await fs.mkdir(f.remotePath, { recursive: true });
+  await fs.writeFile(path.join(f.remotePath, "a.txt"), "alpha");
+  await fs.writeFile(path.join(f.remotePath, "foreign.txt"), "node-only");
+
+  const plain = await preview(f, { adopt: false });
+  assert.ok(plain.plan?.conflicts.some((entry) => entry.reason === "adoption-required"));
+  await assert.rejects(() => f.sync({ planDigest: plain.planDigest, adopt: false }), isCode("conflict"));
+
+  const planned = await preview(f, { adopt: true });
+  assert.equal(planned.plan?.adoptRequired, false);
+  assert.deepEqual(planned.plan?.entries.map((entry) => [entry.kind, entry.path]), [["adopt", "a.txt"]]);
+  await assert.rejects(() => f.sync({ adopt: true }), isCode("preview-required"));
+  const applied = await f.sync({ adopt: true, planDigest: planned.planDigest });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.revision, 1);
+  assert.equal(await fs.readFile(path.join(f.remotePath, "foreign.txt"), "utf8"), "node-only");
+  const status = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(status.value.owned, true);
+  assert.equal(status.value.revision, 1);
 });
 
 test("status inventory is bounded and metadata-only", async () => {

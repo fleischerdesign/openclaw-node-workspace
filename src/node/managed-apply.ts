@@ -297,6 +297,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
 
   let index = 0;
   let applied = 0;
+  let mutated = false;
   try {
     for (const entry of entries) {
       await assertFence(options.lock);
@@ -304,9 +305,17 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
         throw new NodeWorkspaceError("timeout", "the apply phase exceeded the operation deadline");
       }
       await ensureSafeParent(options.destination, entry.path);
-      if (applied === 0) options.onMutationStart?.();
+      if (!mutated && entry.kind !== "adopt") {
+        options.onMutationStart?.();
+        mutated = true;
+      }
       const target = absolute(options.destination, entry.path);
-      if (entry.kind === "add" || entry.kind === "restore") {
+      if (entry.kind === "adopt") {
+        if (entry.after === null) throw new NodeWorkspaceError("protocol", `incomplete adopt entry for ${entry.path}`);
+        if (!(await hashMatches(target, entry.after))) {
+          throw new NodeWorkspaceError("destination-drifted", `${entry.path} changed before adoption`, { path: entry.path });
+        }
+      } else if (entry.kind === "add" || entry.kind === "restore") {
         await assertPathMissing(target, entry.path);
         if (entry.after === null || entry.staged === undefined) {
           throw new NodeWorkspaceError("protocol", `missing staged payload for ${entry.path}`);

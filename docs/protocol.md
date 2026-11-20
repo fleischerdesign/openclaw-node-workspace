@@ -49,9 +49,9 @@ path, parent declaration, duplicate, count and byte limit.
   "t": "plan",
   "planDigest": "64 hex",
   "baseRevision": 3,
-  "counts": { "add": 1, "change": 0, "delete": 0, "mode": 0, "restore": 0,
+  "counts": { "add": 1, "change": 0, "delete": 0, "mode": 0, "restore": 0, "adopt": 0,
               "conflicts": 0, "unchanged": 4, "untracked": 0, "released": 0 },
-  "entries": [{ "kind": "add|change|delete|mode|restore", "path": "…", "before": null, "after": {…} }],
+  "entries": [{ "kind": "add|change|delete|mode|restore|adopt", "path": "…", "before": null, "after": {…} }],
   "directories": ["src"],
   "restorable": [],
   "conflicts": [{ "path": "…", "reason": "node-modified" }],
@@ -64,7 +64,8 @@ path, parent declaration, duplicate, count and byte limit.
 ```
 
 A preview sends the plan and then a `result`. An apply sends the plan and waits for exactly the
-payload entries (`add`, `change`, `restore`).
+payload entries (`add`, `change`, `restore`). `adopt` verifies existing equal bytes and only adds
+them to the committed base; it transfers nothing.
 
 ## Payload frames (Gateway to node)
 

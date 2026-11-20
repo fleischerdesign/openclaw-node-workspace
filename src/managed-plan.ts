@@ -3,7 +3,7 @@ import { NodeWorkspaceError } from "./errors.js";
 import { comparePaths } from "./digest.js";
 import { isSelected, policyEquals, type ResolvedPolicy } from "./policy.js";
 
-export type PlanKind = "add" | "change" | "delete" | "mode" | "restore";
+export type PlanKind = "add" | "change" | "delete" | "mode" | "restore" | "adopt";
 
 export type ConflictReason =
   | "node-modified"
@@ -46,6 +46,7 @@ export interface PlanCounts {
   readonly delete: number;
   readonly mode: number;
   readonly restore: number;
+  readonly adopt: number;
   readonly conflicts: number;
   readonly unchanged: number;
   readonly untracked: number;
@@ -254,7 +255,7 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
       releasedAfter.delete(path);
       if (node !== undefined) {
         if (entryEqual(node, local)) {
-          unchanged += 1;
+          entries.push({ kind: "adopt", path, before: null, after: local });
         } else {
           addConflict(path, "adoption-collision");
         }
@@ -267,7 +268,7 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
     if (node !== undefined) {
       if (input.adopt) {
         if (entryEqual(node, local)) {
-          unchanged += 1;
+          entries.push({ kind: "adopt", path, before: null, after: local });
         } else {
           addConflict(path, "adoption-collision");
         }
@@ -312,6 +313,7 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
     delete: sortedEntries.filter((entry) => entry.kind === "delete").length,
     mode: sortedEntries.filter((entry) => entry.kind === "mode").length,
     restore: sortedEntries.filter((entry) => entry.kind === "restore").length,
+    adopt: sortedEntries.filter((entry) => entry.kind === "adopt").length,
     conflicts: sortedConflicts.length,
     unchanged,
     untracked,
@@ -355,6 +357,7 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
     adoptRequired,
     policyChanged,
     safeForRoutine:
+      input.recordExists &&
       sortedConflicts.length === 0 &&
       counts.delete === 0 &&
       counts.restore === 0 &&

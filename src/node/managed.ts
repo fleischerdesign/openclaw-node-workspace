@@ -661,7 +661,7 @@ async function handleSync(
 }
 
 function emptyCounts(): PlanCounts {
-  return { add: 0, change: 0, delete: 0, mode: 0, restore: 0, conflicts: 0, unchanged: 0, untracked: 0, released: 0 };
+  return { add: 0, change: 0, delete: 0, mode: 0, restore: 0, adopt: 0, conflicts: 0, unchanged: 0, untracked: 0, released: 0 };
 }
 
 interface DirtySummary {

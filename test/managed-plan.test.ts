@@ -198,7 +198,7 @@ test("a released path cannot be re-included without an explicit adopt path", () 
   );
   assert.equal(adopted.conflicts.length, 0);
   assert.equal(adopted.releasedAfter.length, 0);
-  assert.equal(adopted.entries.length, 0, "equal bytes converge without a write");
+  assert.deepEqual(adopted.entries.map((entry) => [entry.kind, entry.path]), [["adopt", "old.txt"]], "equal bytes converge without a write");
 });
 
 test("an unmanaged directory needs explicit adoption", () => {
@@ -224,6 +224,22 @@ test("an unmanaged directory needs explicit adoption", () => {
   assert.equal(adopted.adoptRequired, false);
   assert.deepEqual(adopted.entries.map((entry) => [entry.kind, entry.path]), [["add", "a.txt"]]);
   assert.equal(adopted.counts.untracked, 1);
+});
+
+test("a converged adoption becomes an adopt entry and still needs a preview", () => {
+  const plan = buildManagedPlan(
+    input({
+      recordExists: false,
+      baseManifest: undefined,
+      localFiles: [entry("a.txt", sha("a"))],
+      nodeFiles: [entry("a.txt", sha("a"))],
+      adopt: true,
+    }),
+  );
+  assert.equal(plan.conflicts.length, 0);
+  assert.deepEqual(plan.entries.map((entry) => [entry.kind, entry.path]), [["adopt", "a.txt"]]);
+  assert.equal(plan.counts.adopt, 1);
+  assert.equal(plan.safeForRoutine, false);
 });
 
 test("creation, policy transition and deletion are not routine applies", () => {

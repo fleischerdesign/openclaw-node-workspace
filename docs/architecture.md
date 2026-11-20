@@ -62,6 +62,8 @@ Rules:
 - A file/directory type change cannot remove unmanaged descendants.
 - Selection narrowing releases management; it never deletes the node copy.
 - Re-including a released path needs an explicit `adoptPaths` entry in a pinned apply.
+- Adopting an unmanaged directory records equal existing bytes as an `adopt` entry (no transfer) and
+  leaves node-only files untracked.
 - Policy, creation, adoption, deletion, restore, rebind and release transitions require a pinned
   preview (`planDigest`).
 
