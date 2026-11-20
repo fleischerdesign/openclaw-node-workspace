@@ -45,7 +45,8 @@ All times are milliseconds. `transferred` is the wire payload reported by the sy
 
 | Check | Cache absent | Cache present |
 | --- | ---: | ---: |
-| Node source files preserved after update/delete | 158 checked, 0 changed | 158 checked, 0 changed |
+| One-file update: other source files preserved | 159 checked, 0 changed | 159 checked, 0 changed |
+| Node source files preserved after delete | 158 checked, 0 changed | 158 checked, 0 changed |
 | Local source files preserved | 158 checked, 0 changed | 158 checked, 0 changed |
 | Node dependency cache inode/mtime | — | 2,048 checked, 0 changed |
 | Local dependency cache inode/mtime | — | 2,048 checked, 0 changed |
