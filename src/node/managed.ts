@@ -11,7 +11,9 @@ import {
   type PlanCounts,
   type PlanEntry,
 } from "../managed-plan.js";
+import { nowMs } from "../clock.js";
 import { resolvePolicy, type ResolvedPolicy } from "../policy.js";
+import { assertReceiptQuota, receiptIsLive, receiptState } from "../receipts.js";
 import {
   NODE_RESPONSE_GRACE_MS,
   parseStatusRequest,
@@ -42,13 +44,11 @@ import {
   statePaths,
   workspaceKey,
   type LockHandle,
-  type Receipt,
   type StatePaths,
   type WorkspaceRecord,
 } from "./managed-store.js";
 import { readControl, remaining, sessionFromFrames, type NodeHostCommandIo } from "./session.js";
 
-const RECEIPT_QUOTA = 64;
 
 export interface NodeHostCommandContext {
   readonly signal?: AbortSignal;
@@ -438,6 +438,12 @@ async function handleSync(
           `operation ${hello.operationId} was used with a different request; use a new operation id`,
         );
       }
+      if (existing !== undefined && !receiptIsLive(existing, nowMs())) {
+        throw new NodeWorkspaceError(
+          "receipt-expired",
+          `operation ${hello.operationId} has an expired receipt; inspect the workspace readiness before starting a new operation id. Expiry alone does not authorize a replay.`,
+        );
+      }
       if (existing !== undefined && existing.outcome === "committed") {
         const result: SyncResult = {
           t: "result",
@@ -460,14 +466,7 @@ async function handleSync(
         await session.sendControl(result);
         return JSON.stringify({ ok: true, replayed: true, revision: existing.revision });
       }
-      const now = Date.now();
-      const live = Object.values(record.receipts).filter((entry) => Date.parse(entry.expiresAt) > now);
-      if (live.length >= RECEIPT_QUOTA) {
-        throw new NodeWorkspaceError(
-          "receipt-quota-exceeded",
-          `the workspace holds ${live.length} unexpired operation receipts; wait for expiry instead of evicting them`,
-        );
-      }
+      assertReceiptQuota(record.receipts, nowMs());
     }
 
     // A policy transition is a decision, not an incidental update.
@@ -652,8 +651,9 @@ async function handleSync(
         ? error
         : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
     const readiness = stateDir !== undefined && paths !== undefined ? await readinessOf(paths) : "absent";
-    sendFailure(session, failure, readiness, mutationStarted ? "unknown" : "none");
-    return JSON.stringify({ ok: false, code: failure.code, effect: mutationStarted ? "unknown" : "none" });
+    const effect = mutationStarted && failure.details.rolledBack !== true ? "unknown" : "none";
+    sendFailure(session, failure, readiness, effect);
+    return JSON.stringify({ ok: false, code: failure.code, effect });
   } finally {
     if (lock !== undefined) await releaseLock(lock).catch(() => undefined);
     session.close();
@@ -766,9 +766,14 @@ async function handleStatus(
   }
   const paths = statePaths(destination.root, key);
   const journal = stateDir === undefined ? undefined : await readJournal(paths);
-  let operation: Receipt | null = null;
+  let operation: Record<string, unknown> | null = null;
   if (request.operationId !== undefined) {
-    operation = record?.receipts[request.operationId] ?? null;
+    const state = receiptState(record?.receipts ?? {}, request.operationId, nowMs());
+    const receipt = record?.receipts[request.operationId];
+    operation =
+      receipt === undefined
+        ? null
+        : { ...receipt, state, expired: state === "expired" };
   }
 
   let dirty: DirtySummary | null = null;

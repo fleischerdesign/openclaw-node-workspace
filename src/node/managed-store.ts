@@ -7,6 +7,9 @@ import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { fsyncDirectory } from "../fs-durable.js";
 import type { PlanKind, ReleasedEntry } from "../managed-plan.js";
 import type { ResolvedPolicy } from "../policy.js";
+import type { Receipt } from "../receipts.js";
+
+export type { Receipt };
 import { isWithin, normalizeAbsolutePosixPath } from "../paths.js";
 
 export const STATE_DIR_NAME = ".nodews-state";
@@ -15,16 +18,6 @@ const RECORD_VERSION = 1;
 const JOURNAL_VERSION = 1;
 const LOCK_VERSION = 1;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
-
-export interface Receipt {
-  readonly operationId: string;
-  readonly fingerprint: string;
-  readonly outcome: "committed" | "interrupted" | "rejected";
-  readonly revision: number;
-  readonly digest: string;
-  readonly at: string;
-  readonly expiresAt: string;
-}
 
 export interface WorkspaceRecord {
   readonly version: 1;

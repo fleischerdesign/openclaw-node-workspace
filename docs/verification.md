@@ -8,6 +8,8 @@
 | `test/managed-plan.test.ts` | Pure three-way diff, conflicts, releases, restore, adoption |
 | `test/manifest.test.ts` | Local source scan, digests, limits, symlink/special refusal |
 | `test/managed.test.ts` | Real node handlers over the in-process framed channel, real files on disk |
+| `test/receipts.test.ts` | Seven-day receipt boundary and quota without wall-clock waits |
+| `scripts/bench-managed.mjs` | Reproducible managed-sync benchmark and TypeScript incremental-build smoke |
 | `test/artifact.test.ts` | Real fetch handler, digest and exclusive publication |
 | `scripts/pack-and-inspect.sh` | Real loader and registered tool/command surface |
 | `scripts/integration-isolated.sh` | Two real processes, disposable state and port |
@@ -34,6 +36,10 @@ hop. No test mocks a handler to claim a behaviour the handler does not implement
   roll-forward, external-drift `recovery-blocked`, staging `ENOSPC`, transport loss before and after
   `end`.
 - Status `full` versus `metadata-only`, bounded inventory, source-only drift counts.
+- Receipt liveness strictly before the seven-day boundary, refusal at it, expired pruning and the
+  64-entry quota, driven by an explicit test clock (`NODE_WORKSPACE_TEST_NOW`).
+- Mid-apply `ENOSPC`: the first file is already replaced when the injection fires; every touched file
+  is rolled back, the revision is unchanged, readiness returns to `ready`, and the retry applies.
 
 ## Deliberate limits
 
@@ -53,6 +59,7 @@ npm run build
 bash scripts/pack-and-inspect.sh
 bash scripts/integration-isolated.sh
 bash scripts/e2e-model-driven.sh
+npm run bench:managed
 ```
 
 The integration scripts set `HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH` and `TMPDIR` under a

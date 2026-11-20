@@ -419,6 +419,36 @@ test("a live lock blocks and a provably dead lock is reclaimed", async () => {
   assert.equal(applied.status, "noop");
 });
 
+test("a mid-apply ENOSPC rolls back every touched file and reports no effect", async () => {
+  const f = await fixture({ "a.txt": "alpha", "b.txt": "beta" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest });
+  await fs.writeFile(path.join(f.source, "a.txt"), "changed-a");
+  await fs.writeFile(path.join(f.source, "b.txt"), "changed-b");
+  const planned = await preview(f);
+  const previous = (await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  })).value.revision;
+  process.env.NODE_WORKSPACE_TEST_FAIL = "apply";
+  try {
+    await assert.rejects(() => f.sync({ planDigest: planned.planDigest }), isCode("io"));
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_FAIL;
+  }
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+  assert.equal(await fs.readFile(path.join(f.remotePath, "b.txt"), "utf8"), "beta");
+  const status = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(status.value.revision, previous);
+  assert.equal(status.value.readiness, "ready");
+  const retried = await f.sync({ planDigest: planned.planDigest });
+  assert.equal(retried.status, "applied");
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "changed-a");
+});
+
 test("a replaced lock fences a running handler before any mutation", async () => {
   const f = await fixture({ "a.txt": "alpha" });
   const created = await preview(f);
@@ -630,6 +660,39 @@ test("adopting an existing unmanaged directory needs a pinned preview and record
   });
   assert.equal(status.value.owned, true);
   assert.equal(status.value.revision, 1);
+});
+
+test("receipts are live before the seven-day boundary and refused at it", async () => {
+  const base = 1_800_000_000_000;
+  process.env.NODE_WORKSPACE_TEST_NOW = String(base);
+  try {
+    const f = await fixture({ "a.txt": "alpha" });
+    const created = await preview(f);
+    const id = "9".repeat(32);
+    await f.sync({ planDigest: created.planDigest, operationId: id });
+
+    const active = await managedStatus(f.harness.transport, f.config.gateway, {
+      node: "node-1",
+      remotePath: f.remotePath,
+      operationId: id,
+    });
+    assert.equal((active.value.operation as { state: string }).state, "active");
+
+    process.env.NODE_WORKSPACE_TEST_NOW = String(base + 7 * 24 * 60 * 60 * 1000 - 1);
+    const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
+    assert.equal(replay.status, "replayed");
+
+    process.env.NODE_WORKSPACE_TEST_NOW = String(base + 7 * 24 * 60 * 60 * 1000);
+    await assert.rejects(() => f.sync({ planDigest: created.planDigest, operationId: id }), isCode("receipt-expired"));
+    const expired = await managedStatus(f.harness.transport, f.config.gateway, {
+      node: "node-1",
+      remotePath: f.remotePath,
+      operationId: id,
+    });
+    assert.equal((expired.value.operation as { expired: boolean }).expired, true);
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_NOW;
+  }
 });
 
 test("status inventory is bounded and metadata-only", async () => {

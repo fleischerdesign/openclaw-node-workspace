@@ -3,9 +3,10 @@
 Status: 2026-11-20. This is the authoritative decision record for the accompanying
 persistent-workspaces-proposal.md exploration. Where they differ, this record supersedes it.
 The first release described here is implemented in `src/`; gates 1-3 have executable tests and
-isolated scripts, gate 4 is exercised by the real node canary during acceptance, and gate 5
-(indexed verification, managed return, lifecycle cleanup, alternate delta backends, benchmarks)
-remains open. Treat the implementation notes in the other docs as current.
+isolated scripts, gate 4 is exercised by the real node canary during acceptance, and gate 5 remains
+partly open: a first measured benchmark and incremental-build smoke exist in benchmarks.md, while
+indexed verification, managed return, lifecycle cleanup and alternate delta backends are still
+unimplemented. Treat the implementation notes in the other docs as current.
 
 ## Recommended first release
 

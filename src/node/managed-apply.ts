@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { nowIso, nowMs } from "../clock.js";
 import { sortEntries, treeDigest, type ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import type { ManifestEntry as Entry } from "../digest.js";
 import type { ManagedPlan, ReleasedEntry } from "../managed-plan.js";
+import { liveReceipts, makeReceipt } from "../receipts.js";
 import type { ResolvedPolicy } from "../policy.js";
 import {
   assertFence,
@@ -215,7 +217,7 @@ function backupName(index: number): string {
 export async function applyTransaction(options: ApplyOptions): Promise<CommitResult> {
   const commit = buildCommitResult(options);
   const entries = journalEntries(options.plan);
-  const createdAt = new Date().toISOString();
+  const createdAt = nowIso();
 
   await ensureTransactionDirs(options.paths);
   const prepared: Journal = {
@@ -247,7 +249,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
 
   // Durable per-path intent before any project mutation.
   await fsyncDirectory(options.paths.stageDir);
-  await writeJournal(options.paths, { ...prepared, phase: "applying", updatedAt: new Date().toISOString() });
+  await writeJournal(options.paths, { ...prepared, phase: "applying", updatedAt: nowIso() });
   if (process.env.NODE_WORKSPACE_TEST_FENCE === "after-journal") {
     await fs.writeFile(
       options.lock.file,
@@ -268,7 +270,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     await writeRecord(options.paths.stateDir, workspaceKey(options.plan.remotePath), {
       ...options.previous,
       readiness: "applying",
-      updatedAt: new Date().toISOString(),
+      updatedAt: nowIso(),
     });
   }
 
@@ -369,6 +371,9 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
         await fs.chmod(target, entry.after.executable ? 0o700 : 0o600);
       }
       applied += 1;
+      if (mutated && process.env.NODE_WORKSPACE_TEST_FAIL === "apply") {
+        throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+      }
       injectedCrash(applied === 1 ? "during-apply" : "during-apply-never");
     }
 
@@ -403,8 +408,18 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     } catch {
       // A failed rollback leaves the journal in place so the next operation
       // reports recovery-blocked instead of pretending the base is intact.
+      throw error;
     }
-    throw error;
+    const failure =
+      error instanceof NodeWorkspaceError
+        ? error
+        : new NodeWorkspaceError("io", errorMessage(error), {}, { cause: error });
+    throw new NodeWorkspaceError(
+      failure.code,
+      `${failure.message} (the transaction was rolled back)`,
+      { ...failure.details, rolledBack: true },
+      { cause: error },
+    );
   }
 
   const commitJournal: Journal = {
@@ -420,7 +435,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
       operationId: options.lock.operationId,
       fingerprint: options.fingerprint,
     } satisfies JournalCommit,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso(),
   };
   await writeJournal(options.paths, commitJournal);
   injectedCrash("after-commit");
@@ -437,17 +452,15 @@ async function finishInterrupted(
   lock: LockHandle,
   fingerprint: string,
 ): Promise<void> {
-  const now = new Date().toISOString();
+  const now = nowIso();
   if (previous !== undefined) {
-    const receipt = {
+    const receipt = makeReceipt({
       operationId: lock.operationId,
       fingerprint,
-      outcome: "interrupted" as const,
+      outcome: "interrupted",
       revision: previous.revision,
       digest: previous.digest,
-      at: now,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    };
+    });
     await writeRecord(paths.stateDir, workspaceKey(previous.remotePath), {
       ...previous,
       readiness: "ready",
@@ -464,24 +477,17 @@ async function finalizeCommitted(
 ): Promise<void> {
   const committed = journal.commit;
   if (committed === undefined) throw new NodeWorkspaceError("protocol", "committed journal has no commit record");
-  const now = new Date().toISOString();
-  const receipt = {
+  const now = nowIso();
+  const receipt = makeReceipt({
     operationId: committed.operationId,
     fingerprint: committed.fingerprint,
-    outcome: "committed" as const,
+    outcome: "committed",
     revision: committed.revision,
     digest: committed.digest,
-    at: now,
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-  };
+  });
   const previous = options.previous;
   const stateStat = await fs.stat(options.paths.stateDir);
-  const nowMs = Date.now();
-  const live = options.rebind
-    ? {}
-    : Object.fromEntries(
-        Object.entries(previous?.receipts ?? {}).filter(([, entry]) => Date.parse(entry.expiresAt) > nowMs),
-      );
+  const live = options.rebind ? {} : liveReceipts(previous?.receipts ?? {}, nowMs());
   const reboundFrom = options.rebind && previous !== undefined && previous.localProject !== options.localProject
     ? [...(previous.reboundFrom ?? []), previous.localProject]
     : previous?.reboundFrom;
@@ -647,16 +653,14 @@ export async function recoverTransaction(
     if (committed === undefined) {
       throw new NodeWorkspaceError("recovery-blocked", "committed journal has no commit record");
     }
-    const now = new Date().toISOString();
-    const receipt = {
+    const now = nowIso();
+    const receipt = makeReceipt({
       operationId: committed.operationId,
       fingerprint: committed.fingerprint,
-      outcome: "committed" as const,
+      outcome: "committed",
       revision: committed.revision,
       digest: committed.digest,
-      at: now,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    };
+    });
     const restored: WorkspaceRecord = {
       version: 1,
       workspaceId: journal.workspaceId,
@@ -690,7 +694,7 @@ export async function recoverTransaction(
   if (journal.phase === "prepared") {
     await cleanupTransaction(paths);
     if (record !== undefined) {
-      await writeRecord(paths.stateDir, key, { ...record, readiness: "ready", updatedAt: new Date().toISOString() });
+      await writeRecord(paths.stateDir, key, { ...record, readiness: "ready", updatedAt: nowIso() });
     }
     return { status: "recovered", operationId: journal.operationId };
   }
@@ -702,23 +706,21 @@ export async function recoverTransaction(
         await writeRecord(paths.stateDir, key, {
           ...record,
           readiness: "recovery-blocked",
-          updatedAt: new Date().toISOString(),
+          updatedAt: nowIso(),
         });
       }
       return { status: "blocked", affected: [String(error.details.path ?? "unknown")], operationId: journal.operationId };
     }
     throw error;
   }
-  const now = new Date().toISOString();
-  const receipt = {
+  const now = nowIso();
+  const receipt = makeReceipt({
     operationId: journal.operationId,
     fingerprint: journal.fingerprint,
-    outcome: "interrupted" as const,
+    outcome: "interrupted",
     revision: record?.revision ?? 0,
     digest: record?.digest ?? "",
-    at: now,
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-  };
+  });
   if (record !== undefined) {
     await writeRecord(paths.stateDir, key, {
       ...record,

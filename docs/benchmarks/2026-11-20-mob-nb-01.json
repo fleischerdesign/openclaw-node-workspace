@@ -1,0 +1,271 @@
+{
+  "generatedAt": "2026-11-20T13:28:53.979Z",
+  "environment": {
+    "hostname": "mob-nb-01",
+    "platform": "linux 6.18.58 x64",
+    "cpus": 16,
+    "node": "v24.22.2",
+    "sourceFiles": 160,
+    "sourceBytes": 4096,
+    "cacheFiles": 2048,
+    "cacheBytes": 16384,
+    "peakRssKb": 99656
+  },
+  "modes": {
+    "absent": {
+      "cache": false,
+      "cachePreservation": null,
+      "fixture": {
+        "sourceFiles": 160,
+        "sourceBytes": 655360,
+        "cacheFiles": 0,
+        "cacheBytes": 0
+      },
+      "cold": {
+        "previewMs": 119.13,
+        "applyMs": 233.86,
+        "transferredBytes": 654570,
+        "revision": 1
+      },
+      "noop": {
+        "ms": 180.12,
+        "p50Ms": 167.48,
+        "minMs": 166.13,
+        "maxMs": 180.12,
+        "transferredBytes": 0,
+        "revision": 1
+      },
+      "oneFileUpdate": {
+        "ms": 187.65,
+        "transferredBytes": 4090,
+        "counts": {
+          "add": 0,
+          "change": 1,
+          "delete": 0,
+          "mode": 0,
+          "restore": 0,
+          "adopt": 0,
+          "conflicts": 0,
+          "unchanged": 159,
+          "untracked": 0,
+          "released": 0
+        },
+        "preservation": {
+          "checked": 159,
+          "changed": 0,
+          "changedPaths": []
+        }
+      },
+      "delete": {
+        "previewMs": 170.4,
+        "applyMs": 183.84,
+        "transferredBytes": 0,
+        "counts": {
+          "add": 0,
+          "change": 0,
+          "delete": 1,
+          "mode": 0,
+          "restore": 0,
+          "adopt": 0,
+          "conflicts": 0,
+          "unchanged": 159,
+          "untracked": 0,
+          "released": 0
+        },
+        "preservation": {
+          "checked": 159,
+          "changed": 0,
+          "changedPaths": []
+        }
+      },
+      "sourcePreservation": {
+        "checked": 158,
+        "changed": 0,
+        "changedPaths": []
+      },
+      "localSourcePreservation": {
+        "checked": 158,
+        "changed": 0,
+        "changedPaths": []
+      },
+      "disk": {
+        "freeBeforeBytes": 524284383232,
+        "freeAfterColdBytes": 524283666432,
+        "freeAfterBytes": 524283678720,
+        "workspaceBytes": 650470,
+        "workspaceFiles": 159,
+        "stateAfterColdBytes": 22204,
+        "stateBytes": 22580,
+        "writeUpperBoundBytes": 662755
+      },
+      "status": {
+        "owned": true,
+        "revision": 3,
+        "readiness": "ready",
+        "verification": "full",
+        "dirty": {
+          "nodeChanged": 0,
+          "nodeMissing": 0,
+          "untracked": 0,
+          "protectedCount": 0,
+          "excluded": 0
+        }
+      },
+      "protectedCount": 1
+    },
+    "present": {
+      "cache": true,
+      "cachePreservation": {
+        "node": {
+          "checked": 2048,
+          "changed": 0,
+          "changedPaths": []
+        },
+        "local": {
+          "checked": 2048,
+          "changed": 0,
+          "changedPaths": []
+        }
+      },
+      "fixture": {
+        "sourceFiles": 160,
+        "sourceBytes": 655360,
+        "cacheFiles": 2048,
+        "cacheBytes": 33554432
+      },
+      "cold": {
+        "previewMs": 90.41,
+        "applyMs": 214.93,
+        "transferredBytes": 654570,
+        "revision": 1
+      },
+      "noop": {
+        "ms": 178.78,
+        "p50Ms": 166.36,
+        "minMs": 164.94,
+        "maxMs": 178.78,
+        "transferredBytes": 0,
+        "revision": 1
+      },
+      "oneFileUpdate": {
+        "ms": 183.99,
+        "transferredBytes": 4090,
+        "counts": {
+          "add": 0,
+          "change": 1,
+          "delete": 0,
+          "mode": 0,
+          "restore": 0,
+          "adopt": 0,
+          "conflicts": 0,
+          "unchanged": 159,
+          "untracked": 0,
+          "released": 0
+        },
+        "preservation": {
+          "checked": 159,
+          "changed": 0,
+          "changedPaths": []
+        }
+      },
+      "delete": {
+        "previewMs": 170.79,
+        "applyMs": 173.59,
+        "transferredBytes": 0,
+        "counts": {
+          "add": 0,
+          "change": 0,
+          "delete": 1,
+          "mode": 0,
+          "restore": 0,
+          "adopt": 0,
+          "conflicts": 0,
+          "unchanged": 159,
+          "untracked": 0,
+          "released": 0
+        },
+        "preservation": {
+          "checked": 159,
+          "changed": 0,
+          "changedPaths": []
+        }
+      },
+      "sourcePreservation": {
+        "checked": 158,
+        "changed": 0,
+        "changedPaths": []
+      },
+      "localSourcePreservation": {
+        "checked": 158,
+        "changed": 0,
+        "changedPaths": []
+      },
+      "disk": {
+        "freeBeforeBytes": 524241006592,
+        "freeAfterColdBytes": 524240289792,
+        "freeAfterBytes": 524198301696,
+        "workspaceBytes": 34196350,
+        "workspaceFiles": 2207,
+        "stateAfterColdBytes": 22208,
+        "stateBytes": 22584,
+        "writeUpperBoundBytes": 662755
+      },
+      "status": {
+        "owned": true,
+        "revision": 3,
+        "readiness": "ready",
+        "verification": "full",
+        "dirty": {
+          "nodeChanged": 0,
+          "nodeMissing": 0,
+          "untracked": 0,
+          "protectedCount": 0,
+          "excluded": 1
+        }
+      },
+      "protectedCount": 1
+    }
+  },
+  "build": {
+    "compiler": "/home/philipp/.local/state/openclaw-node/workspace/nodews-check-20261120d/node_modules/.bin/tsc",
+    "coldBuildMs": 701.09,
+    "incrementalBuildMs": 294.66,
+    "editedBuildMs": 310.88,
+    "sync": {
+      "noopStatus": "noop",
+      "updateRevision": 2,
+      "updateCounts": {
+        "add": 0,
+        "change": 1,
+        "delete": 0,
+        "mode": 0,
+        "restore": 0,
+        "adopt": 0,
+        "conflicts": 0,
+        "unchanged": 3,
+        "untracked": 0,
+        "released": 0
+      }
+    },
+    "distUntouchedByNoopSync": {
+      "checked": 3,
+      "changed": 0,
+      "changedPaths": []
+    },
+    "distUntouchedByEditSync": {
+      "checked": 3,
+      "changed": 0,
+      "changedPaths": []
+    },
+    "aOutputChangedAfterRebuild": true,
+    "bOutputPreservedAfterRebuild": true,
+    "untracked": {
+      "nodeChanged": 0,
+      "nodeMissing": 0,
+      "untracked": 0,
+      "protectedCount": 0,
+      "excluded": 1
+    },
+    "passed": true
+  }
+}

@@ -86,6 +86,7 @@ export interface SyncOutcome {
   readonly verification: "full";
   readonly recovery: string;
   readonly protectedCount: number;
+  readonly nodeProtectedCount: number;
   readonly untracked: number;
   readonly durationMs: number;
   readonly plan: SyncPlanSummary | undefined;
@@ -292,7 +293,8 @@ export async function syncManaged(
         caches: result.caches,
         verification: result.verification,
         recovery: result.recovery,
-        protectedCount: result.protectedCount,
+        protectedCount: scan.protectedCount,
+        nodeProtectedCount: result.protectedCount,
         untracked: result.untracked,
         durationMs: Date.now() - startedAt,
         plan: plan === undefined ? undefined : summarizePlan(plan),
@@ -452,7 +454,8 @@ export async function syncManaged(
         caches: applied.caches,
         verification: applied.verification,
         recovery: applied.recovery,
-        protectedCount: applied.protectedCount,
+        protectedCount: scan.protectedCount,
+        nodeProtectedCount: applied.protectedCount,
         untracked: applied.untracked,
         durationMs: Date.now() - startedAt,
         plan: summarizePlan(plan),

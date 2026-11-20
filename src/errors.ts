@@ -24,6 +24,7 @@ export type NodeWorkspaceErrorCode =
   | "operation-mismatch"
   | "preview-required"
   | "receipt-quota-exceeded"
+  | "receipt-expired"
   | "workspace-locked"
   | "workspace-forbidden"
   | "recovery-blocked"
