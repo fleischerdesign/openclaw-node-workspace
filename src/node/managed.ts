@@ -21,8 +21,10 @@ import {
   type SyncHello,
   type SyncResult,
 } from "../protocol.js";
+import { writeAllBytes } from "../fs-durable.js";
 import { assertSafeRelativePath, normalizeAbsolutePosixPath } from "../paths.js";
 import { assertControlFrame, controlType, type FrameSession } from "../transport.js";
+import { scanManagedSource, type ManagedScan } from "./managed-scan.js";
 import {
   applyTransaction,
   InjectedCrash,
@@ -31,7 +33,6 @@ import {
   stagedFileName,
   type RecoveryResult,
 } from "./managed-apply.js";
-import { scanManagedSource, type ManagedScan } from "./managed-scan.js";
 import {
   acquireLock,
   assertFence,
@@ -356,7 +357,7 @@ async function stageIncomingFiles(
       if (frame.data.byteLength > left) {
         throw new NodeWorkspaceError("protocol", `received more data than declared for ${open.entry.path}`);
       }
-      await open.handle.write(frame.data);
+      await writeAllBytes(open.handle, frame.data);
       open.hash.update(frame.data);
       open.received += frame.data.byteLength;
       if (open.received === expected.size) await finish();
@@ -438,8 +439,20 @@ async function handleSync(
       record = await readRecord(stateDir, key);
       assertOwnership(record, hello, owner);
       paths = statePaths(destination.root, key);
+      const journal = await readJournal(paths);
+      if (journal !== undefined) {
+        if (journal.owner === undefined || journal.owner.agentId !== owner.agentId) {
+          throw new NodeWorkspaceError(
+            "workspace-forbidden",
+            "an unresolved transaction belongs to another Gateway-asserted agent; refusing to recover or mutate it",
+          );
+        }
+      }
       recovery = await recoverTransaction(destination.destination, paths, key, lock);
       record = await readRecord(stateDir, key);
+      // Recovery may have restored a different committed binding; re-check
+      // before planning or mutating with this caller's assertion.
+      assertOwnership(record, hello, owner);
       if (recovery.status === "blocked") {
         throw new NodeWorkspaceError(
           "recovery-blocked",
@@ -726,6 +739,15 @@ function summarize(record: WorkspaceRecord, scan: ManagedScan): DirtySummary {
   return { nodeChanged, nodeMissing, untracked, protectedCount: scan.protectedCount, excluded: scan.excluded };
 }
 
+function readinessFor(
+  record: WorkspaceRecord | undefined,
+  journal: Awaited<ReturnType<typeof readJournal>>,
+): string {
+  if (record?.readiness === "recovery-blocked") return "recovery-blocked";
+  if (journal !== undefined) return journal.phase === "committed" ? "committed" : "interrupted";
+  return record?.readiness ?? "unbound";
+}
+
 async function handleStatus(
   state: ConfigState,
   paramsJSON: string | null | undefined,
@@ -776,7 +798,7 @@ async function handleStatus(
           remotePath: record.remotePath,
           localProject: record.localProject,
           revision: record.revision,
-          readiness: journal === undefined ? record.readiness : "interrupted",
+          readiness: readinessFor(record, journal),
           updatedAt: record.updatedAt,
           verification: "metadata-only",
         });
@@ -845,14 +867,7 @@ async function handleStatus(
     directory: destinationExists.directory,
     owned: record !== undefined,
     adoptionRequired: record === undefined && destinationExists.exists,
-    readiness:
-      record?.readiness === "recovery-blocked"
-        ? "recovery-blocked"
-        : journal !== undefined
-          ? journal.phase === "committed"
-            ? "committed"
-            : "interrupted"
-          : (record?.readiness ?? "unbound"),
+    readiness: readinessFor(record, journal),
     revision: record?.revision ?? null,
     digest: record?.digest ?? null,
     policy: record?.policy ?? null,

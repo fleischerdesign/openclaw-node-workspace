@@ -7,7 +7,7 @@ import { sortEntries, treeDigest, type ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import type { ManifestEntry as Entry } from "../digest.js";
 import type { ManagedPlan, ReleasedEntry } from "../managed-plan.js";
-import { liveReceipts, makeReceipt } from "../receipts.js";
+import { boundReceipts, liveReceipts, makeReceipt } from "../receipts.js";
 import type { ResolvedPolicy } from "../policy.js";
 import {
   assertFence,
@@ -228,6 +228,10 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     baseRevision: options.plan.baseRevision,
     planDigest: options.plan.digest,
     counts: options.plan.counts,
+    owner: options.owner,
+    localProject: options.localProject,
+    epoch: options.epoch,
+    rebind: options.rebind,
     phase: "prepared",
     entries,
     createdAt,
@@ -277,9 +281,12 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
 
   // Create missing directories first, with the claimed workspace as the only
   // root. A file or symlink in the chain is a conflict.
+  let createdDestination = false;
+  const createdDirectories: string[] = [];
   if (options.previous === undefined && (await lstatOrUndefined(options.destination)) === undefined) {
     try {
       await fs.mkdir(options.destination, { mode: 0o700 });
+      createdDestination = true;
     } catch (error) {
       throw new NodeWorkspaceError("io", `cannot create ${options.destination}: ${errorMessage(error)}`, {}, {
         cause: error,
@@ -291,17 +298,20 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     const stat = await lstatOrUndefined(target);
     if (stat === undefined) {
       await fs.mkdir(target, { mode: 0o700 });
+      createdDirectories.push(target);
       continue;
     }
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new NodeWorkspaceError("destination-drifted", `cannot create directory ${directory}: a non-directory exists`);
     }
   }
-
   let index = 0;
   let applied = 0;
   let mutated = false;
   try {
+    if (process.env.NODE_WORKSPACE_TEST_FAIL === "after-dirs") {
+      throw Object.assign(new Error("injected failure after directory creation"), { code: "ENOSPC" });
+    }
     for (const entry of entries) {
       await assertFence(options.lock);
       if (Date.now() > options.deadline) {
@@ -413,6 +423,10 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
         options.plan.digest,
         options.plan.counts,
       );
+      for (const directory of createdDirectories.sort((left, right) => right.length - left.length)) {
+        await fs.rmdir(directory).catch(() => undefined);
+      }
+      if (createdDestination) await fs.rmdir(options.destination).catch(() => undefined);
     } catch {
       // A failed rollback leaves the journal in place so the next operation
       // reports recovery-blocked instead of pretending the base is intact.
@@ -497,7 +511,11 @@ async function finishInterrupted(
     await writeRecord(paths.stateDir, workspaceKey(previous.remotePath), {
       ...previous,
       readiness: "ready",
-      receipts: { ...previous.receipts, [lock.operationId]: receipt },
+      receipts: boundReceipts(
+        { ...previous.receipts, [lock.operationId]: receipt },
+        nowMs(),
+        lock.operationId,
+      ),
       updatedAt: now,
     });
   }
@@ -538,7 +556,7 @@ async function finalizeCommitted(
     released: committed.released,
     readiness: "ready",
     stateDir: committed.stateDir,
-    receipts: { ...live, [committed.operationId]: receipt },
+    receipts: boundReceipts({ ...live, [committed.operationId]: receipt }, nowMs(), committed.operationId),
     ...(committed.reboundFrom ? { reboundFrom: committed.reboundFrom } : {}),
     createdAt: committed.createdAt,
     updatedAt: now,
@@ -727,9 +745,13 @@ export async function recoverTransaction(
       released: committed.released,
       readiness: "ready",
       stateDir: committed.stateDir,
-      receipts: committed.rebind
-        ? { [committed.operationId]: receipt }
-        : { ...(record?.receipts ?? {}), [committed.operationId]: receipt },
+      receipts: boundReceipts(
+        committed.rebind
+          ? { [committed.operationId]: receipt }
+          : { ...(record?.receipts ?? {}), [committed.operationId]: receipt },
+        Date.parse(now),
+        committed.operationId,
+      ),
       ...(committed.reboundFrom ? { reboundFrom: committed.reboundFrom } : {}),
       createdAt: committed.createdAt,
       updatedAt: now,
@@ -779,7 +801,11 @@ export async function recoverTransaction(
     await writeRecord(paths.stateDir, key, {
       ...record,
       readiness: "ready",
-      receipts: { ...record.receipts, [journal.operationId]: receipt },
+      receipts: boundReceipts(
+        { ...record.receipts, [journal.operationId]: receipt },
+        Date.parse(now),
+        journal.operationId,
+      ),
       updatedAt: now,
     });
   }

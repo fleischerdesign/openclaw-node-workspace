@@ -95,9 +95,10 @@ before syncing if they may write source files.
 
 Automatic dead-lock reclamation is disabled because POSIX has no compare-and-delete primitive; a
 read-then-rename can delete a newly created live lock. When status or an error names a dead pid and
-token, stop every node command for that state directory, confirm the pid is gone, then run the
-explicit maintenance helper with that exact token and pid (it refuses a live or replaced lock). Do
-this only on a quiescent node; never delete a lock file by path from a running system.
+token, stop the node host, then run `scripts/lock-maintenance.mjs` with `--quiescent --yes` and that
+exact `--token`/`--pid` (dead readable lock) or that exact `--sha256` (unreadable lock). It refuses a
+live process, a changed/replaced lock and missing confirmation. Never delete a lock file by path from
+a running system.
 
 ## Retention and space
 
@@ -105,8 +106,9 @@ this only on a quiescent node; never delete a lock file by path from a running s
   "clean up"; it is the ownership record.
 - Stage and backup data exist only during a transaction. A committed journal is cleaned on the next
   operation if cleanup was interrupted.
-- Receipts expire after seven days. The per-workspace cap is 64 unexpired receipts; a full cap refuses
-  new work instead of evicting live receipts.
+- Receipts expire after seven days. The committed ledger is capped at 4096 entries and 2 MiB; a full cap refuses
+  a mutation instead of evicting live receipts. Interrupted history is bounded by the same byte cap
+  and pruned oldest-first on every write, keeping the operation named by the active journal.
 - Only the plugin's own unreferenced transaction data is auto-cleaned. Caches and workspaces are not
   deleted by age, marker or glob.
 

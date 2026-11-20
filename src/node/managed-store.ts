@@ -4,7 +4,7 @@ import path from "node:path";
 
 import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
-import { fsyncDirectory } from "../fs-durable.js";
+import { fsyncDirectory, writeAllBytes } from "../fs-durable.js";
 import type { PlanCounts, PlanKind, ReleasedEntry } from "../managed-plan.js";
 import type { ResolvedPolicy } from "../policy.js";
 import type { Receipt } from "../receipts.js";
@@ -86,6 +86,10 @@ export interface Journal {
   readonly baseRevision: number;
   readonly planDigest: string;
   readonly counts: PlanCounts;
+  readonly owner: WorkspaceRecord["owner"];
+  readonly localProject: string;
+  readonly epoch: number;
+  readonly rebind: boolean;
   readonly phase: "prepared" | "applying" | "committed";
   readonly entries: readonly JournalEntry[];
   readonly commit?: JournalCommit;
@@ -207,14 +211,6 @@ export function statePaths(root: string, key: string): StatePaths {
 
 export { fsyncDirectory };
 
-async function writeAll(handle: Awaited<ReturnType<typeof fs.open>>, body: Uint8Array): Promise<void> {
-  let offset = 0;
-  while (offset < body.byteLength) {
-    const { bytesWritten } = await handle.write(body, offset, body.byteLength - offset);
-    offset += bytesWritten;
-  }
-}
-
 /** Atomic single-file JSON write: temp, fsync, rename, fsync parent. */
 export async function atomicWriteJson(file: string, value: unknown, mode = 0o600): Promise<void> {
   const body = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
@@ -227,7 +223,7 @@ export async function atomicWriteJson(file: string, value: unknown, mode = 0o600
   let handle;
   try {
     handle = await fs.open(temp, "wx", mode);
-    await writeAll(handle, body);
+    await writeAllBytes(handle, body);
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -398,6 +394,10 @@ export async function readJournal(paths: JournalPaths): Promise<Journal | undefi
       typeof value.operationId !== "string" ||
       typeof value.remotePath !== "string" ||
       typeof value.planDigest !== "string" ||
+      value.owner === undefined ||
+      typeof value.localProject !== "string" ||
+      typeof value.epoch !== "number" ||
+      typeof value.rebind !== "boolean" ||
       (value.phase !== "prepared" && value.phase !== "applying" && value.phase !== "committed") ||
       !Array.isArray(value.entries)
     ) {
@@ -514,8 +514,9 @@ export async function acquireLock(
   key: string,
   operationId: string,
 ): Promise<LockHandle> {
-  const file = path.join(stateDir, "locks", `${key}.lock`);
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const directory = path.join(stateDir, "locks");
+  const file = path.join(directory, `${key}.lock`);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const selfStart = await processStart(process.pid);
   const body: LockBody = {
     version: 1,
@@ -526,22 +527,38 @@ export async function acquireLock(
     operationId,
     acquiredAt: Date.now(),
   };
+  const temp = path.join(directory, `.lock-${randomUUID()}.tmp`);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    const handle = await fs.open(file, "wx", 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(body)}\n`, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
+    handle = await fs.open(temp, "wx", 0o600);
+    await writeAllBytes(handle, Buffer.from(`${JSON.stringify(body)}\n`, "utf8"));
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    if (process.env.NODE_WORKSPACE_TEST_FAIL_LOCK === "before-link") {
+      throw Object.assign(new Error("injected lock publication failure"), { code: "ENOSPC" });
     }
-    await fsyncDirectory(path.dirname(file));
+    // link(2) publishes the complete, fsynced body atomically; the final name
+    // never exists with an empty or partial body.
+    await fs.link(temp, file);
+    await fsyncDirectory(directory);
     return { file, token: body.token, operationId };
   } catch (error) {
-    if (!isErrno(error, "EEXIST")) {
-      throw new NodeWorkspaceError("io", `cannot acquire the workspace lock: ${errorMessage(error)}`, {}, {
+    const existing = await readLock(file);
+    if (existing !== undefined && !isErrno(error, "EEXIST")) {
+      // The link failed for a reason other than a competing lock; surface it.
+      throw new NodeWorkspaceError("io", `cannot publish the workspace lock: ${errorMessage(error)}`, {}, {
         cause: error,
       });
     }
+    if (existing === undefined && !isErrno(error, "EEXIST")) {
+      throw new NodeWorkspaceError("io", `cannot publish the workspace lock: ${errorMessage(error)}`, {}, {
+        cause: error,
+      });
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.rm(temp, { force: true }).catch(() => undefined);
   }
   const existing = await readLock(file);
   if (existing === undefined) {
@@ -560,7 +577,7 @@ export async function acquireLock(
     "workspace-locked",
     `workspace is locked by a dead process (pid ${existing.pid}, operation ${existing.operationId}); ` +
       "automatic reclamation is disabled because it cannot be made race-free without a compare-and-delete primitive. " +
-      "Run the documented quiescent-node maintenance to release this exact lock.",
+      "Run scripts/lock-maintenance.mjs on the quiescent node to release this exact lock.",
     { pid: existing.pid, operationId: existing.operationId },
   );
 }

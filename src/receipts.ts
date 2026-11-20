@@ -102,3 +102,40 @@ export function assertReceiptQuota(
     );
   }
 }
+
+/**
+ * Bound the live receipt ledger on every write.
+ *
+ * Committed receipts are protected by the quota before a mutation, so the byte
+ * overflow here is normally interrupted history. Drop the oldest interrupted
+ * receipts, never the one that belongs to the journal being written, until the
+ * live set fits the byte cap.
+ */
+export function boundReceipts(
+  receipts: Readonly<Record<string, Receipt>>,
+  now: number,
+  keepOperationId?: string,
+): Record<string, Receipt> {
+  const live = liveReceipts(receipts, now);
+  let bytes = Buffer.byteLength(JSON.stringify(live), "utf8");
+  if (bytes <= RECEIPT_MAX_BYTES) return live;
+
+  const removable = () =>
+    Object.values(live)
+      .filter((receipt) => receipt.outcome !== "committed" && receipt.operationId !== keepOperationId)
+      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+
+  for (const receipt of removable()) {
+    if (bytes <= RECEIPT_MAX_BYTES) break;
+    bytes -= Buffer.byteLength(JSON.stringify(receipt), "utf8") + 1;
+    delete live[receipt.operationId];
+  }
+  // The estimate above can be a byte or two off; verify once and drop more if
+  // needed. Committed receipts and the active recovery id are never removed.
+  while (Buffer.byteLength(JSON.stringify(live), "utf8") > RECEIPT_MAX_BYTES) {
+    const next = removable()[0];
+    if (next === undefined) break;
+    delete live[next.operationId];
+  }
+  return live;
+}

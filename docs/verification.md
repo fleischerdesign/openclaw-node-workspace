@@ -38,7 +38,8 @@ hop. No test mocks a handler to claim a behaviour the handler does not implement
   `end`.
 - Status `full` versus `metadata-only`, bounded inventory, source-only drift counts.
 - Receipt liveness strictly before the seven-day boundary, refusal at it, expired pruning and the
-  64-entry quota, driven by an explicit test clock (`NODE_WORKSPACE_TEST_NOW`).
+  4096-entry / 2 MiB committed ledger, driven by an explicit test clock
+  (`NODE_WORKSPACE_TEST_NOW`), plus bounded interrupted history.
 - Mid-apply `ENOSPC`: the first file is already replaced when the injection fires; every touched file
   is rolled back, the revision is unchanged, readiness returns to `ready`, and the retry applies.
 - Durability order: staged payload `sync()` precedes `close()`; staged bytes are re-verified before

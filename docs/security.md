@@ -72,9 +72,11 @@ owner-only (`0600`, or `0700` when executable).
 ## Failure semantics
 
 A stale workspace lock is never reclaimed automatically: without a compare-and-delete primitive, a
-stale read followed by a rename can delete a newly created live lock. Dead locks fail closed with the
-inspected pid and token; release is an explicit quiescent-node maintenance action that must name the
-exact inspected token and pid and refuses a live or replaced lock.
+stale read followed by a rename can delete a newly created live lock. Lock bodies are published by
+writing and fsyncing a temp file, then `link(2)`, so the final name is never empty or partial. Dead locks fail closed with the
+inspected pid and token; release is `scripts/lock-maintenance.mjs` on a stopped node, naming the exact inspected token/pid
+(dead readable lock) or exact sha256 (unreadable lock), with `--quiescent --yes`; it refuses a live
+process or a changed/replaced lock.
 
 A failure before any possible effect is a typed error. A failure after `end` may have committed; it
 is `unknown-outcome` and must be resolved with `node_workspace_status` and the same `operationId`,

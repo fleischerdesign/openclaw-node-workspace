@@ -3,8 +3,10 @@ import test from "node:test";
 
 import { NodeWorkspaceError } from "../src/errors.js";
 import {
+  RECEIPT_MAX_BYTES,
   RECEIPT_QUOTA,
   RECEIPT_RETENTION_MS,
+  boundReceipts,
   assertReceiptQuota,
   liveReceipts,
   makeReceipt,
@@ -25,6 +27,18 @@ function receipt(index: number, now = BASE) {
     now,
   });
 }
+
+test("the write bound prunes old interrupted receipts but keeps the active one", () => {
+  const receipts: Record<string, ReturnType<typeof receipt>> = {};
+  for (let index = 0; index < 6000; index += 1) {
+    const entry = { ...receipt(index), outcome: "interrupted" as const };
+    receipts[entry.operationId] = entry;
+  }
+  const keep = Object.values(receipts)[0]!;
+  const bounded = boundReceipts(receipts, BASE, keep.operationId);
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded), "utf8") <= RECEIPT_MAX_BYTES);
+  assert.ok(bounded[keep.operationId] !== undefined, "the active recovery receipt was dropped");
+});
 
 test("a receipt is live strictly before expiry and expired at the boundary", () => {
   const entry = receipt(1);

@@ -1147,6 +1147,14 @@ test("a crash after the registry record is cleaned and replayed without a second
   } finally {
     delete process.env.NODE_WORKSPACE_TEST_CRASH;
   }
+  const inventory = await managedStatus(f.harness.transport, f.config.gateway, { node: "node-1" });
+  const rows = inventory.value.workspaces as { readiness?: string }[];
+  assert.equal(rows[0]?.readiness, "committed", "inventory and detail disagree on a committed journal");
+  const detail = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(detail.value.readiness, "committed");
   const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
   assert.equal(replay.status, "replayed");
   assert.equal(replay.revision, 1);
@@ -1166,6 +1174,14 @@ test("a crash after cleanup leaves a clean committed workspace", async () => {
   } finally {
     delete process.env.NODE_WORKSPACE_TEST_CRASH;
   }
+  const inventory = await managedStatus(f.harness.transport, f.config.gateway, { node: "node-1" });
+  const rows = inventory.value.workspaces as { readiness?: string }[];
+  assert.equal(rows[0]?.readiness, "ready", "a cleaned journal must not be reported as committed");
+  const detail = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(detail.value.readiness, "ready");
   const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
   assert.equal(replay.status, "replayed");
   assert.equal(replay.revision, 1);
@@ -1200,4 +1216,152 @@ test("progress bytesTotal counts only payload bytes", async () => {
   const sending = progress.filter((entry) => entry.phase === "sending");
   assert.ok(sending.length > 0);
   assert.ok(sending.every((entry) => entry.bytesTotal === 2));
+});
+
+test("lock publication failure leaves no partial lock and a retry succeeds", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const stateDir = path.join(f.nodeRoot, ".nodews-state");
+  const store = await import("../src/node/managed-store.js");
+  const lockFile = path.join(stateDir, "locks", `${store.workspaceKey(f.remotePath)}.lock`);
+  process.env.NODE_WORKSPACE_TEST_FAIL_LOCK = "before-link";
+  try {
+    await assert.rejects(() => f.sync({ planDigest: created.planDigest }), isCode("io"));
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_FAIL_LOCK;
+  }
+  await assert.rejects(() => fs.lstat(lockFile), /ENOENT/);
+  assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
+  const applied = await f.sync({ planDigest: created.planDigest });
+  assert.equal(applied.status, "applied");
+});
+
+test("an unreadable lock blocks automatic work without deleting it", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest });
+  const store = await import("../src/node/managed-store.js");
+  const lockFile = path.join(f.nodeRoot, ".nodews-state", "locks", `${store.workspaceKey(f.remotePath)}.lock`);
+  await fs.writeFile(lockFile, "not-json");
+  await assert.rejects(() => f.sync({}), isCode("workspace-locked"));
+  assert.equal(await fs.readFile(lockFile, "utf8"), "not-json");
+  await fs.rm(lockFile);
+});
+
+test("a foreign agent cannot trigger recovery of another owner's committed journal", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  process.env.NODE_WORKSPACE_TEST_CRASH = "after-commit";
+  try {
+    await assert.rejects(
+      () => f.sync({ planDigest: created.planDigest, ownerAgent: "alice" }),
+      isCode("unknown-outcome"),
+    );
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_CRASH;
+  }
+  const store = await import("../src/node/managed-store.js");
+  const key = store.workspaceKey(f.remotePath);
+  const recordFile = path.join(f.nodeRoot, ".nodews-state", "workspaces", `${key}.json`);
+  await fs.rm(recordFile, { force: true });
+  const bob = path.join(f.source, "bob-project");
+  await fs.mkdir(bob, { recursive: true });
+  await fs.writeFile(path.join(bob, "a.txt"), "bob");
+  await assert.rejects(
+    () =>
+      syncManaged(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        localPath: bob,
+        remotePath: f.remotePath,
+        workspaceRoot: f.source,
+        operationId: op(),
+        mode: "preview",
+        create: false,
+        adopt: false,
+        adoptPaths: [],
+        restore: [],
+        rebind: false,
+        expectedRevision: undefined,
+        planDigest: undefined,
+        policy: {},
+        owner: { agentId: "bob", sessionKey: "agent:bob:test" },
+        signal: undefined,
+        progress: undefined,
+      }),
+    isCode("workspace-forbidden"),
+  );
+  assert.equal(await fs.lstat(recordFile).then(() => true, () => false), false, "foreign recovery wrote a record");
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+
+  const recovered = await f.sync({ mode: "preview", create: false, ownerAgent: "alice" });
+  assert.equal(recovered.status, "planned");
+  const status = await managedStatusRaw(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+    owner: { agentId: "alice", sessionKey: null },
+  });
+  assert.equal(status.value.localProject, await fs.realpath(f.source));
+  assert.equal(status.value.revision, 1);
+
+  await assert.rejects(
+    () =>
+      syncManaged(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        localPath: bob,
+        remotePath: f.remotePath,
+        workspaceRoot: f.source,
+        operationId: op(),
+        mode: "preview",
+        create: false,
+        adopt: false,
+        adoptPaths: [],
+        restore: [],
+        rebind: false,
+        expectedRevision: undefined,
+        planDigest: undefined,
+        policy: {},
+        owner: { agentId: "alice", sessionKey: "agent:alice:test" },
+        signal: undefined,
+        progress: undefined,
+      }),
+    isCode("workspace-forbidden"),
+  );
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+});
+
+test("a first-create failure after directory creation removes only the new empty directories", async () => {
+  const f = await fixture({ "nested/a.txt": "alpha" });
+  const created = await preview(f);
+  process.env.NODE_WORKSPACE_TEST_FAIL = "after-dirs";
+  try {
+    await assert.rejects(() => f.sync({ planDigest: created.planDigest }), isCode("io"));
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_FAIL;
+  }
+  assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
+  const applied = await f.sync({ planDigest: created.planDigest });
+  assert.equal(applied.status, "applied");
+});
+
+test("short writes are completed by the durable write helper", async () => {
+  const { writeAllBytes } = await import("../src/fs-durable.js");
+  const target = new Uint8Array(10).fill(7);
+  const written: number[] = [];
+  let offset = 0;
+  await writeAllBytes(
+    {
+      async write(buffer: Uint8Array) {
+        const chunk = Math.min(3, buffer.byteLength);
+        written.push(chunk);
+        for (let index = 0; index < chunk; index += 1) {
+          // The fake never mutates the source; it just reports a short write.
+        }
+        offset += chunk;
+        return { bytesWritten: chunk };
+      },
+    },
+    target,
+  );
+  assert.equal(offset, 10);
+  assert.ok(written.every((value) => value > 0));
 });

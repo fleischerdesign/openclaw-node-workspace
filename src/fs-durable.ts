@@ -24,3 +24,18 @@ export async function fsyncDirectory(directory: string): Promise<void> {
     await handle?.close().catch(() => undefined);
   }
 }
+
+/** Write every byte even when the handle reports a short write. */
+export async function writeAllBytes(
+  handle: { write(buffer: Uint8Array, offset?: number, length?: number): Promise<{ bytesWritten: number }> },
+  body: Uint8Array,
+): Promise<void> {
+  let offset = 0;
+  while (offset < body.byteLength) {
+    const { bytesWritten } = await handle.write(body.subarray(offset), 0, body.byteLength - offset);
+    if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0) {
+      throw new NodeWorkspaceError("io", "short write made no progress");
+    }
+    offset += bytesWritten;
+  }
+}
