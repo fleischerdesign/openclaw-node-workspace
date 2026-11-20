@@ -6,11 +6,21 @@ import test from "node:test";
 
 import { resolvePluginConfig } from "../src/config.js";
 import { NodeWorkspaceError } from "../src/errors.js";
-import { managedStatus } from "../src/gateway/managed-status.js";
+import { managedStatus as managedStatusRaw } from "../src/gateway/managed-status.js";
 import { syncManaged, type SyncInput } from "../src/gateway/sync.js";
 import { COMMAND_SYNC, PROTOCOL_VERSION } from "../src/protocol.js";
 import { createNodeCommands } from "../src/node/commands.js";
 import { createHarness, type Faults } from "./helpers/sim.js";
+
+const STATUS_OWNER = { agentId: "main", sessionKey: "agent:main:test" } as const;
+
+function managedStatus(
+  transport: Parameters<typeof managedStatusRaw>[0],
+  config: Parameters<typeof managedStatusRaw>[1],
+  input: Omit<Parameters<typeof managedStatusRaw>[2], "owner">,
+) {
+  return managedStatusRaw(transport, config, { ...input, owner: STATUS_OWNER });
+}
 
 let counter = 0;
 function op(): string {
@@ -404,17 +414,31 @@ test("path traversal in a hello manifest is rejected by the node before any writ
   session.close();
 });
 
-test("a live lock blocks and a provably dead lock is reclaimed", async () => {
+test("a dead lock blocks until explicit maintenance, and never removes a live replacement", async () => {
   const f = await fixture({ "a.txt": "alpha" });
   const created = await preview(f);
   await f.sync({ planDigest: created.planDigest });
   const stateDir = path.join(f.nodeRoot, ".nodews-state");
-  const key = (await import("../src/node/managed-store.js")).workspaceKey(f.remotePath);
+  const store = await import("../src/node/managed-store.js");
+  const key = store.workspaceKey(f.remotePath);
   const lockFile = path.join(stateDir, "locks", `${key}.lock`);
-  const body = { version: 1, pid: process.pid, processStart: null, host: "node", token: "live", operationId: op(), acquiredAt: Date.now() };
-  await fs.writeFile(lockFile, JSON.stringify(body));
+  const dead = { version: 1, pid: 999_999, processStart: null, host: "node", token: "dead-token", operationId: op(), acquiredAt: Date.now() };
+  await fs.writeFile(lockFile, JSON.stringify(dead));
   await assert.rejects(() => f.sync({}), isCode("workspace-locked"));
-  await fs.writeFile(lockFile, JSON.stringify({ ...body, pid: 999_999 }));
+  assert.equal(JSON.parse(await fs.readFile(lockFile, "utf8")).token, "dead-token");
+
+  // A replacement with another live owner must survive a stale-token request.
+  const live = { ...dead, pid: process.pid, token: "live-token" };
+  await fs.writeFile(lockFile, JSON.stringify(live));
+  await assert.rejects(
+    () => store.releaseStaleLockForMaintenance(stateDir, key, { token: "dead-token", pid: 999_999 }),
+    isCode("workspace-locked"),
+  );
+  assert.equal(JSON.parse(await fs.readFile(lockFile, "utf8")).token, "live-token");
+
+  // Explicit maintenance only removes the exact dead lock it inspected.
+  await fs.writeFile(lockFile, JSON.stringify(dead));
+  await store.releaseStaleLockForMaintenance(stateDir, key, { token: "dead-token", pid: 999_999 });
   const applied = await f.sync({});
   assert.equal(applied.status, "noop");
 });
@@ -705,4 +729,467 @@ test("status inventory is bounded and metadata-only", async () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.remotePath, f.remotePath);
   assert.equal(entries[0]?.verification, "metadata-only");
+});
+
+test("staged payloads sync bytes before closing the handle", async () => {
+  const { closeStagedPayload } = await import("../src/node/managed.js");
+  const order: string[] = [];
+  await closeStagedPayload({
+    async sync() {
+      order.push("sync");
+    },
+    async close() {
+      order.push("close");
+    },
+  });
+  assert.deepEqual(order, ["sync", "close"]);
+
+  const failed: string[] = [];
+  await assert.rejects(
+    () =>
+      closeStagedPayload({
+        async sync() {
+          failed.push("sync");
+          throw new Error("sync failed");
+        },
+        async close() {
+          failed.push("close");
+        },
+      }),
+    /sync failed/,
+  );
+  assert.deepEqual(failed, ["sync", "close"]);
+});
+
+test("converged node bytes become the base, then edits and deletion work", async () => {
+  const f = await fixture({ "a.txt": "alpha", "stale/x.txt": "x" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest });
+
+  await fs.writeFile(path.join(f.source, "a.txt"), "beta");
+  await fs.writeFile(path.join(f.remotePath, "a.txt"), "beta");
+  const converged = await preview(f);
+  assert.deepEqual(converged.plan?.entries.map((entry) => [entry.kind, entry.path]), [["adopt", "a.txt"]]);
+  await f.sync({ planDigest: converged.planDigest });
+
+  await fs.writeFile(path.join(f.source, "a.txt"), "gamma");
+  const changed = await f.sync({});
+  assert.equal(changed.status, "applied");
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "gamma");
+
+  await fs.rm(path.join(f.source, "a.txt"));
+  const deleted = await preview(f);
+  assert.deepEqual(deleted.plan?.entries.map((entry) => [entry.kind, entry.path]), [["delete", "a.txt"]]);
+  await f.sync({ planDigest: deleted.planDigest });
+  await assert.rejects(() => fs.lstat(path.join(f.remotePath, "a.txt")), /ENOENT/);
+});
+
+test("the committed directory manifest drops a directory whose last file was deleted", async () => {
+  const f = await fixture({ "keep/a.txt": "a", "stale/x.txt": "x" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest });
+  await fs.rm(path.join(f.source, "stale"), { recursive: true });
+  const planned = await preview(f);
+  assert.ok(planned.plan?.entries.some((entry) => entry.kind === "delete" && entry.path === "stale/x.txt"));
+  await f.sync({ planDigest: planned.planDigest });
+
+  const store = await import("../src/node/managed-store.js");
+  const key = store.workspaceKey(f.remotePath);
+  const record = JSON.parse(
+    await fs.readFile(path.join(f.nodeRoot, ".nodews-state", "workspaces", `${key}.json`), "utf8"),
+  ) as { directories: string[] };
+  assert.ok(record.directories.includes("keep"));
+  assert.ok(!record.directories.includes("stale"));
+});
+
+test("an end frame delivered before a send error is still an unknown outcome", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const { decodeFrame } = await import("../src/frames.js");
+  const wrapped = {
+    ...f.harness.transport,
+    async openDuplex(request: Parameters<typeof f.harness.transport.openDuplex>[0]) {
+      const channel = await f.harness.transport.openDuplex(request);
+      const send = channel.send.bind(channel);
+      channel.send = async (message: Uint8Array) => {
+        const frame = decodeFrame(message);
+        await send(message);
+        if (frame.kind === "control" && (frame.value as { t?: string }).t === "end") {
+          throw new Error("delivered then failed");
+        }
+      };
+      return channel;
+    },
+  };
+  await assert.rejects(
+    () =>
+      syncManaged(wrapped, f.config.gateway, {
+        node: "node-1",
+        localPath: f.source,
+        remotePath: f.remotePath,
+        workspaceRoot: f.source,
+        operationId: op(),
+        mode: "apply",
+        create: true,
+        adopt: false,
+        adoptPaths: [],
+        restore: [],
+        rebind: false,
+        expectedRevision: undefined,
+        planDigest: created.planDigest,
+        policy: {},
+        owner: { agentId: "main", sessionKey: "agent:main:test" },
+        signal: undefined,
+        progress: undefined,
+      }),
+    isCode("unknown-outcome"),
+  );
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await fs.lstat(path.join(f.remotePath, "a.txt")).then(() => true, () => false)) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+  const status = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(status.value.revision, 1);
+});
+
+test("a missing asserted owner or a foreign owner is refused on sync and status", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest, ownerAgent: "main" });
+
+  await assert.rejects(
+    () =>
+      syncManaged(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        localPath: f.source,
+        remotePath: f.remotePath,
+        workspaceRoot: f.source,
+        operationId: op(),
+        mode: "preview",
+        create: false,
+        adopt: false,
+        adoptPaths: [],
+        restore: [],
+        rebind: false,
+        expectedRevision: undefined,
+        planDigest: undefined,
+        policy: {},
+        owner: { agentId: null, sessionKey: "agent:main:test" },
+        signal: undefined,
+        progress: undefined,
+      }),
+    isCode("identity-unresolved"),
+  );
+
+  await assert.rejects(
+    () =>
+      syncManaged(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        localPath: f.source,
+        remotePath: f.remotePath,
+        workspaceRoot: f.source,
+        operationId: op(),
+        mode: "preview",
+        create: false,
+        adopt: false,
+        adoptPaths: [],
+        restore: [],
+        rebind: false,
+        expectedRevision: undefined,
+        planDigest: undefined,
+        policy: {},
+        owner: { agentId: "other", sessionKey: "agent:other:test" },
+        signal: undefined,
+        progress: undefined,
+      }),
+    isCode("workspace-forbidden"),
+  );
+
+  await assert.rejects(
+    () =>
+      managedStatusRaw(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        remotePath: f.remotePath,
+        owner: { agentId: null, sessionKey: null },
+      } as never),
+    isCode("identity-unresolved"),
+  );
+  await assert.rejects(
+    () =>
+      managedStatusRaw(f.harness.transport, f.config.gateway, {
+        node: "node-1",
+        remotePath: f.remotePath,
+        owner: { agentId: "other", sessionKey: "agent:other:test" },
+      }),
+    isCode("workspace-forbidden"),
+  );
+  const inventory = await managedStatusRaw(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    owner: { agentId: "other", sessionKey: "agent:other:test" },
+  });
+  assert.deepEqual(inventory.value.workspaces, []);
+});
+
+test("a node invocation session that disagrees with the asserted session is refused", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const mismatched = createHarness(
+    createNodeCommands({
+      gateway: { localRoots: [f.source] },
+      node: { pushRoots: [f.nodeRoot] },
+    }).commands,
+    {},
+    { sessionKey: "agent:other:session" },
+  );
+  await assert.rejects(() => f.syncOn(mismatched, { planDigest: created.planDigest }), isCode("workspace-forbidden"));
+});
+
+test("reserved state-directory names are refused anywhere in the destination ancestry", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  await fs.mkdir(path.join(f.nodeRoot, "sub", ".nodews-state"), { recursive: true });
+  await fs.mkdir(path.join(f.nodeRoot, ".nodews-state"), { recursive: true });
+  for (const remotePath of [
+    path.join(f.nodeRoot, ".nodews-state", "app"),
+    path.join(f.nodeRoot, "sub", ".nodews-state", "app"),
+  ]) {
+    await assert.rejects(
+      () => f.sync({ remotePath, mode: "preview" }),
+      isCode("path-outside-root"),
+    );
+  }
+});
+
+test("create=false does not create a new managed workspace", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  await assert.rejects(
+    () => f.sync({ planDigest: created.planDigest, create: false }),
+    isCode("create-not-authorized"),
+  );
+  assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
+  const applied = await f.sync({ planDigest: created.planDigest, create: true });
+  assert.equal(applied.status, "applied");
+});
+
+test("the node rejects forged cache and protected paths independently", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const { FrameSession } = await import("../src/transport.js");
+  const { encodeControl } = await import("../src/frames.js");
+  const send = async (manifest: unknown[], directories: string[]): Promise<Record<string, unknown>> => {
+    const channel = await f.harness.transport.openDuplex({ nodeId: "node-1", command: COMMAND_SYNC, timeoutMs: 5_000 });
+    const session = FrameSession.openSync(channel);
+    await session.sendControl({
+      t: "hello",
+      protocol: PROTOCOL_VERSION,
+      mode: "preview",
+      operationId: op(),
+      nodeId: "node-1",
+      owner: { agentId: "main", sessionKey: "agent:main:test" },
+      localProject: f.source,
+      remotePath: f.remotePath,
+      policy: { preset: "none", include: [], exclude: [], protect: [] },
+      create: true,
+      adopt: false,
+      adoptPaths: [],
+      restore: [],
+      rebind: false,
+      timeoutMs: 5_000,
+      manifest,
+      directories,
+    });
+    const frame = await session.next(5_000);
+    session.close();
+    if (frame.kind !== "control") throw new Error("expected a control frame");
+    return frame.value as Record<string, unknown>;
+  };
+  const sha = "a".repeat(64);
+  const secret = await send([{ path: ".env", size: 1, sha256: sha, executable: false }], []);
+  assert.equal(secret.code, "policy-violation");
+  const cache = await send(
+    [{ path: "node_modules/pkg/index.js", size: 1, sha256: sha, executable: false }],
+    ["node_modules", "node_modules/pkg"],
+  );
+  assert.equal(cache.code, "policy-violation");
+  void encodeControl;
+});
+
+test("a rebind crash after the commit journal restores the new binding without a registry", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest, operationId: "1".repeat(32) });
+  const other = path.join(f.source, "rebound-project");
+  await fs.mkdir(other, { recursive: true });
+  await fs.writeFile(path.join(other, "a.txt"), "alpha");
+
+  const planned = await f.sync({
+    localPath: other,
+    mode: "preview",
+    create: false,
+    rebind: true,
+    policy: {},
+    ownerAgent: "main",
+  });
+  process.env.NODE_WORKSPACE_TEST_CRASH = "after-commit";
+  try {
+    await assert.rejects(
+      () =>
+        f.sync({
+          localPath: other,
+          mode: "apply",
+          create: false,
+          rebind: true,
+          planDigest: planned.planDigest,
+          policy: {},
+          ownerAgent: "main",
+          operationId: "2".repeat(32),
+        }),
+      isCode("unknown-outcome"),
+    );
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_CRASH;
+  }
+
+  const store = await import("../src/node/managed-store.js");
+  const key = store.workspaceKey(f.remotePath);
+  const recordFile = path.join(f.nodeRoot, ".nodews-state", "workspaces", `${key}.json`);
+  await fs.rm(recordFile, { force: true });
+
+  const recovered = await f.sync({
+    localPath: other,
+    mode: "preview",
+    create: false,
+    rebind: true,
+    policy: {},
+    ownerAgent: "main",
+  });
+  assert.equal(recovered.status, "planned");
+  const status = await managedStatus(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+  });
+  assert.equal(status.value.localProject, other);
+  assert.equal(status.value.epoch, 2);
+  const old = await managedStatusRaw(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    remotePath: f.remotePath,
+    operationId: "1".repeat(32),
+    owner: STATUS_OWNER,
+  });
+  assert.equal(old.value.operation, null);
+});
+
+test("quota blocks a mutation but never a preview or a no-op", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  process.env.NODE_WORKSPACE_TEST_RECEIPT_QUOTA = "2";
+  try {
+    const created = await preview(f);
+    await f.sync({ planDigest: created.planDigest });
+    await fs.writeFile(path.join(f.source, "a.txt"), "beta");
+    await f.sync({});
+    const atQuota = await preview(f);
+    assert.equal(atQuota.status, "planned");
+    const noop = await f.sync({});
+    assert.equal(noop.status, "noop");
+    await fs.writeFile(path.join(f.source, "a.txt"), "gamma");
+    await assert.rejects(() => f.sync({}), isCode("receipt-quota-exceeded"));
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_RECEIPT_QUOTA;
+  }
+});
+
+test("replay returns the original planDigest and counts", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const id = "7".repeat(32);
+  const first = await f.sync({ planDigest: created.planDigest, operationId: id });
+  const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
+  assert.equal(replay.status, "replayed");
+  assert.equal(replay.planDigest, first.planDigest);
+  assert.deepEqual(replay.counts, first.counts);
+});
+
+test("a crash after the applying journal and before mutation leaves the base untouched", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  process.env.NODE_WORKSPACE_TEST_CRASH = "after-applying-journal";
+  try {
+    await assert.rejects(() => f.sync({ planDigest: created.planDigest }), isCode("unknown-outcome"));
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_CRASH;
+  }
+  assert.equal(await fs.lstat(f.remotePath).then(() => true, () => false), false);
+  const resumed = await f.sync({ planDigest: created.planDigest });
+  assert.equal(resumed.status, "applied");
+});
+
+test("a crash after the registry record is cleaned and replayed without a second apply", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const id = op();
+  process.env.NODE_WORKSPACE_TEST_CRASH = "after-record";
+  try {
+    await assert.rejects(
+      () => f.sync({ planDigest: created.planDigest, operationId: id }),
+      isCode("unknown-outcome"),
+    );
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_CRASH;
+  }
+  const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
+  assert.equal(replay.status, "replayed");
+  assert.equal(replay.revision, 1);
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+});
+
+test("a crash after cleanup leaves a clean committed workspace", async () => {
+  const f = await fixture({ "a.txt": "alpha" });
+  const created = await preview(f);
+  const id = op();
+  process.env.NODE_WORKSPACE_TEST_CRASH = "after-cleanup";
+  try {
+    await assert.rejects(
+      () => f.sync({ planDigest: created.planDigest, operationId: id }),
+      isCode("unknown-outcome"),
+    );
+  } finally {
+    delete process.env.NODE_WORKSPACE_TEST_CRASH;
+  }
+  const replay = await f.sync({ planDigest: created.planDigest, operationId: id });
+  assert.equal(replay.status, "replayed");
+  assert.equal(replay.revision, 1);
+  assert.equal(await fs.readFile(path.join(f.remotePath, "a.txt"), "utf8"), "alpha");
+});
+
+test("progress bytesTotal counts only payload bytes", async () => {
+  const f = await fixture({ "small.txt": "a", "large.txt": "x".repeat(120_000) });
+  const created = await preview(f);
+  await f.sync({ planDigest: created.planDigest });
+  await fs.writeFile(path.join(f.source, "small.txt"), "bb");
+  const progress: SyncProgress[] = [];
+  await syncManaged(f.harness.transport, f.config.gateway, {
+    node: "node-1",
+    localPath: f.source,
+    remotePath: f.remotePath,
+    workspaceRoot: f.source,
+    operationId: op(),
+    mode: "apply",
+    create: false,
+    adopt: false,
+    adoptPaths: [],
+    restore: [],
+    rebind: false,
+    expectedRevision: undefined,
+    planDigest: undefined,
+    policy: {},
+    owner: { agentId: "main", sessionKey: "agent:main:test" },
+    signal: undefined,
+    progress: (entry) => progress.push(entry),
+  });
+  const sending = progress.filter((entry) => entry.phase === "sending");
+  assert.ok(sending.length > 0);
+  assert.ok(sending.every((entry) => entry.bytesTotal === 2));
 });

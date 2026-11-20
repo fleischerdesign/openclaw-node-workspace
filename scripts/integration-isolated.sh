@@ -239,7 +239,7 @@ NODE
 
 stage "invoke nodews.status through the real Gateway and node"
 isolated gateway openclaw nodes invoke --node "$NODE_ID" --command nodews.status \
-  --params "{\"remotePath\":\"$WORK/node-root/pushed\"}" >"$WORK/invoke.txt" 2>&1
+  --params "{\"owner\":{\"agentId\":\"integration-agent\",\"sessionKey\":null},\"remotePath\":\"$WORK/node-root/pushed\"}" >"$WORK/invoke.txt" 2>&1
 cat "$WORK/invoke.txt"
 node - "$WORK/invoke.txt" <<'NODE'
 const fs = require("node:fs");

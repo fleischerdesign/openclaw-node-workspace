@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { NodeWorkspaceError } from "../src/errors.js";
 import {
-  assertDestinationName,
   assertSafeRelativePath,
   isWithin,
   normalizeAbsolutePosixPath,
@@ -34,9 +33,3 @@ test("assertSafeRelativePath rejects traversal, absolute paths, backslashes, and
   assert.equal(assertSafeRelativePath("a/b.txt"), "a/b.txt");
 });
 
-test("assertDestinationName rejects separators and traversal", () => {
-  for (const value of ["", ".", "..", "a/b", "a\\b"]) {
-    assert.throws(() => assertDestinationName(value), NodeWorkspaceError);
-  }
-  assert.equal(assertDestinationName("workspace"), "workspace");
-});

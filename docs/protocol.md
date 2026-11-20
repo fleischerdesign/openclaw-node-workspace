@@ -95,9 +95,13 @@ Failure:
 
 `effect: "unknown"` is the only case the Gateway may turn into `unknown-outcome`.
 
+A stored receipt includes its original `planDigest` and `counts`; a replayed result returns those,
+not a fabricated empty summary. An expired id is `receipt-expired`; status reports
+`operation.state = "expired"`.
+
 ## Status
 
-Request: `{ "remotePath"?: "/abs", "operationId"?: "32 hex", "verify"?: true, "limit"?: 50 }`.
+Request: `{ "owner": { "agentId": "…", "sessionKey": "…|null" }, "timeoutMs"?: 120000, "remotePath"?: "/abs", "operationId"?: "32 hex", "verify"?: true, "limit"?: 50 }`.
 
 With `remotePath`, the response reports `exists`, `directory`, `owned`, `adoptionRequired`,
 `readiness`, `revision`, `digest`, `policy`, `verification`, `dirty` (when verified), `operation`
@@ -110,6 +114,8 @@ Unchanged in shape: `meta`, data frames, `done`; failures are `rejected` or `fet
 verified against the node's SHA-256 and published exclusively at the Gateway.
 
 ## Deadlines
+
+Status and fetch carry `timeoutMs`; the node derives its deadline with the same response grace.
 
 The hello carries the Gateway budget. The node derives its deadline as
 `min(now + timeoutMs - NODE_RESPONSE_GRACE_MS, hard cap)`, so a live node reports a typed `timeout`

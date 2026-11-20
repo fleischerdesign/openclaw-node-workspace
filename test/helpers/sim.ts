@@ -82,7 +82,7 @@ export interface Harness {
 export function createHarness(
   commands: readonly NodeHostCommand[],
   faults: Faults = {},
-  nodeContext: { readonly agentId?: string; readonly sessionKey?: string } = {},
+  nodeContext: { readonly sessionKey?: string } = {},
 ): Harness {
   const opens: string[] = [];
   const nodeErrors: Error[] = [];

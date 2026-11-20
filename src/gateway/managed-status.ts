@@ -1,5 +1,5 @@
 import type { GatewayConfig } from "../config.js";
-import { NodeWorkspaceError, errorMessage } from "../errors.js";
+import { NodeWorkspaceError, errorMessage, isNodeWorkspaceErrorCode } from "../errors.js";
 import { COMMAND_STATUS, type StatusRequest } from "../protocol.js";
 import { resolveNodeId, type NodeTransport } from "../transport.js";
 
@@ -39,7 +39,7 @@ function unwrap(raw: unknown): Record<string, unknown> {
 export async function managedStatus(
   transport: NodeTransport,
   config: GatewayConfig,
-  input: StatusRequest & { readonly node: string; readonly signal?: AbortSignal | undefined },
+  input: Omit<StatusRequest, "timeoutMs"> & { readonly node: string; readonly signal?: AbortSignal | undefined },
 ): Promise<ManagedStatusOutcome> {
   const nodeId = await resolveNodeId(transport, input.node);
   try {
@@ -47,6 +47,8 @@ export async function managedStatus(
       nodeId,
       command: COMMAND_STATUS,
       params: {
+        owner: input.owner,
+        timeoutMs: config.timeoutMs,
         ...(input.remotePath !== undefined ? { remotePath: input.remotePath } : {}),
         ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
         ...(input.verify !== undefined ? { verify: input.verify } : {}),
@@ -55,7 +57,17 @@ export async function managedStatus(
       timeoutMs: config.timeoutMs,
       ...(input.signal ? { signal: input.signal } : {}),
     });
-    return { nodeId, value: unwrap(raw) };
+    const value = unwrap(raw);
+    if (value.ok === false && isNodeWorkspaceErrorCode(value.code)) {
+      throw new NodeWorkspaceError(
+        value.code,
+        typeof value.message === "string" ? value.message : "the node rejected the status request",
+        typeof value.details === "object" && value.details !== null
+          ? (value.details as Record<string, unknown>)
+          : {},
+      );
+    }
+    return { nodeId, value };
   } catch (error) {
     if (error instanceof NodeWorkspaceError) throw error;
     throw new NodeWorkspaceError("transport", `status request failed: ${errorMessage(error)}`, {}, { cause: error });

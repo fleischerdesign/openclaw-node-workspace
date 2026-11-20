@@ -62,10 +62,15 @@ workspace to force a refresh; the path is the cache.
 
 ## Routine versus pinned updates
 
-- A routine apply (add/change/mode only, no conflicts) may omit `planDigest`.
+- A routine apply (add/change/mode/adopt only, no conflicts) may omit `planDigest`.
+- `create` must be true (or `adopt` true) for an apply to a path with no registry record.
+- Converged node bytes are recorded as an `adopt` entry; no payload is transferred.
 - Deletion, creation, adoption, restore, rebind, release re-inclusion and policy transitions need a
   fresh preview and its `planDigest`.
 - `expectedRevision` is an optional CAS. A mismatch is `revision-mismatch`; preview again.
+- Receipts are bounded at 4096 unexpired committed entries and 2 MiB per workspace. A full quota
+  refuses a mutation; preview and a no-op still work. Interrupted/rolled-back attempts do not count
+  against the committed quota.
 - A no-op apply writes nothing and does not advance the revision.
 
 ## Status and recovery
@@ -85,6 +90,14 @@ After an `unknown-outcome`:
 Recovery is automatic on the next operation: prepared journals are discarded, applying journals are
 rolled back, committed journals are rolled forward. Native `exec` processes are not fenced; stop them
 before syncing if they may write source files.
+
+## Dead lock maintenance
+
+Automatic dead-lock reclamation is disabled because POSIX has no compare-and-delete primitive; a
+read-then-rename can delete a newly created live lock. When status or an error names a dead pid and
+token, stop every node command for that state directory, confirm the pid is gone, then run the
+explicit maintenance helper with that exact token and pid (it refuses a live or replaced lock). Do
+this only on a quiescent node; never delete a lock file by path from a running system.
 
 ## Retention and space
 
@@ -112,7 +125,11 @@ place.
 | `preview-required` | The update is destructive or structural; preview it and pass `planDigest`. |
 | `conflict` with `node-modified` | The node copy changed. Retrieve or discard it explicitly; the plugin will not overwrite it. |
 | `conflict` with `untracked` | A node-only file occupies a selected path. Move, adopt or rename it. |
-| `workspace-locked` | Another operation owns the workspace lock, or the lock is unreadable. Inspect status. |
+| `workspace-locked` | Another operation owns the workspace lock, the lock is unreadable, or a dead owner left it. Automatic reclamation is disabled. |
+| `identity-unresolved` | The Gateway supplied no agent identity for a managed call. The node cannot attest an agent id; this is a Gateway-assertion requirement. |
+| `create-not-authorized` | The path is unmanaged and the apply did not set `create` or `adopt`. |
+| `policy-violation` | A forged manifest tried to send a cache, protected or unselected path. |
+| `symlink-rejected` | Source contains a symlink outside an excluded cache. Move the link into an excluded dependency directory or remove it. |
 | `workspace-forbidden` | The authenticated agent or local project does not match the registry binding. |
 | `recovery-blocked` | A previous transaction is mixed. Inspect the affected paths and the backup area. |
-| `receipt-quota-exceeded` | Too many unexpired operation receipts; wait for expiry. |
+| `receipt-quota-exceeded` | The committed receipt ledger is at its entry or byte bound; wait for expiry. A preview or no-op still succeeds. |

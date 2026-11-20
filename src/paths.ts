@@ -3,7 +3,6 @@ import path from "node:path";
 import { NodeWorkspaceError } from "./errors.js";
 
 export const MAX_PATH_BYTES = 4096;
-export const MAX_MARKER_BYTES = 4 * 1024 * 1024;
 export const MAX_COMPONENT_BYTES = 255;
 
 function invalid(message: string): never {
@@ -34,12 +33,6 @@ export function isWithin(root: string, child: string): boolean {
   return child.startsWith(prefix);
 }
 
-export function assertWithinRoot(root: string, child: string, label: string): void {
-  if (!isWithin(root, child)) {
-    throw new NodeWorkspaceError("path-outside-root", `${label} is outside the configured root ${root}`);
-  }
-}
-
 /**
  * Validate a manifest-relative path. The returned value is safe to join to a
  * staging directory on a POSIX filesystem.
@@ -61,19 +54,6 @@ export function assertSafeRelativePath(value: string, label = "path"): string {
     if (Buffer.byteLength(segment, "utf8") > MAX_COMPONENT_BYTES) {
       invalid(`${label} contains a component longer than ${MAX_COMPONENT_BYTES} bytes`);
     }
-  }
-  return value;
-}
-
-/** Validate the final path segment of a push destination. */
-export function assertDestinationName(value: string): string {
-  if (typeof value !== "string" || value.length === 0) invalid("destination name must not be empty");
-  if (value === "." || value === "..") invalid("destination name must not be a traversal segment");
-  if (value.includes("/") || value.includes("\0") || value.includes("\\")) {
-    invalid("destination name must be a single path segment");
-  }
-  if (Buffer.byteLength(value, "utf8") > MAX_COMPONENT_BYTES) {
-    invalid(`destination name must not exceed ${MAX_COMPONENT_BYTES} bytes`);
   }
   return value;
 }

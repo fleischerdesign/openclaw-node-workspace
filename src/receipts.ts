@@ -2,7 +2,8 @@ import { nowMs } from "./clock.js";
 import { NodeWorkspaceError } from "./errors.js";
 
 export const RECEIPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-export const RECEIPT_QUOTA = 64;
+export const RECEIPT_QUOTA = 4096;
+export const RECEIPT_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface Receipt {
   readonly operationId: string;
@@ -10,6 +11,8 @@ export interface Receipt {
   readonly outcome: "committed" | "interrupted" | "rejected";
   readonly revision: number;
   readonly digest: string;
+  readonly planDigest: string;
+  readonly counts: import("./managed-plan.js").PlanCounts;
   readonly at: string;
   readonly expiresAt: string;
 }
@@ -20,6 +23,8 @@ export function makeReceipt(input: {
   readonly outcome: Receipt["outcome"];
   readonly revision: number;
   readonly digest: string;
+  readonly planDigest: string;
+  readonly counts: import("./managed-plan.js").PlanCounts;
   readonly now?: number;
 }): Receipt {
   const now = input.now ?? nowMs();
@@ -29,6 +34,8 @@ export function makeReceipt(input: {
     outcome: input.outcome,
     revision: input.revision,
     digest: input.digest,
+    planDigest: input.planDigest,
+    counts: input.counts,
     at: new Date(now).toISOString(),
     expiresAt: new Date(now + RECEIPT_RETENTION_MS).toISOString(),
   };
@@ -68,15 +75,30 @@ export function receiptState(
  * Expired entries never block; they are dropped by the next write. Evicting a
  * live receipt would silently turn a retry into a second apply.
  */
+function receiptQuota(): number {
+  const raw = process.env.NODE_WORKSPACE_TEST_RECEIPT_QUOTA;
+  if (raw !== undefined) {
+    const parsed = Number(raw);
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
+  return RECEIPT_QUOTA;
+}
+
 export function assertReceiptQuota(
   receipts: Readonly<Record<string, Receipt>>,
   now: number,
 ): void {
-  const live = Object.keys(liveReceipts(receipts, now));
-  if (live.length >= RECEIPT_QUOTA) {
+  const live = liveReceipts(receipts, now);
+  // A rolled-back or interrupted attempt is not a committed update and must
+  // not consume the committed-operation budget.
+  const committedReceipts = Object.values(live).filter((receipt) => receipt.outcome === "committed");
+  const committed = committedReceipts.length;
+  const bytes = Buffer.byteLength(JSON.stringify(committedReceipts), "utf8");
+  const quota = receiptQuota();
+  if (committed >= quota || bytes >= RECEIPT_MAX_BYTES) {
     throw new NodeWorkspaceError(
       "receipt-quota-exceeded",
-      `the workspace holds ${live.length} unexpired operation receipts; wait for expiry instead of evicting them`,
+      `the workspace holds ${committed} unexpired committed receipts (${bytes} bytes); wait for expiry or run the documented maintenance instead of evicting live receipts`,
     );
   }
 }

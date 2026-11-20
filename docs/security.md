@@ -12,12 +12,22 @@
 ## Ownership binding
 
 The node keeps a registry outside the workspace at `<root>/.nodews-state/workspaces/<key>.json`. It
-records the canonical remote path, the canonical local project, the authenticated agent id, policy,
+records the canonical remote path, canonical local project, the Gateway-asserted agent id, policy,
 revision, manifest, released entries, epoch, state-directory identity pin and receipts.
 
-- A workspace belongs to the agent identity the host supplies to the node command. A call whose
-  authenticated agent differs is `workspace-forbidden`.
-- A registry bound to an agent rejects a call that carries no authenticated identity.
+**Trust boundary.** The inspected node command context exposes `sessionKey` and `signal`, but no
+agent id (`OpenClawPluginNodeHostCommandContext`). The node command invocation policy context exposes
+node id, client scopes/connection and config, again no agent id. Therefore:
+
+- The agent id in a managed call is **asserted by the Gateway tool context** (`agentId` from the
+  plugin tool factory), not attested by the node.
+- The node records `owner.assertedBy = "gateway"` and rejects a missing assertion. When both the
+  invocation context and the hello carry a session key, they must agree.
+- A different asserted agent is `workspace-forbidden`; a status call without an asserted owner is
+  `identity-unresolved`; inventory filters by the asserted owner and detail rejects another owner.
+- This separates normal callers inside one authenticated Gateway. It is **not** protection against a
+  malicious authorized Gateway, a locally forged node command, or a same-UID process; those are
+  outside the threat model.
 - Changing the bound local project needs an explicit `rebind` with a pinned preview; the epoch
   advances, receipts are invalidated, and the previous path is kept only as `reboundFrom` audit data.
 - A marker-shaped file inside the tree is ordinary data. It never authorizes adoption, deletion or
@@ -39,7 +49,8 @@ examples; explicit `protect` patterns can add more.
 and toolchain freshness belong to the project's own install/build command.
 
 Default protected patterns are a mitigation, not a proof that a tree contains no secrets. Exclusion
-selection is not authority either.
+selection is not authority either. The first release does not implement exact protected-path
+overrides: `protect` can only add patterns. There is no hidden bypass.
 
 ## Path safety
 
@@ -59,6 +70,11 @@ exist, and is published with an exclusive link/copy after the bytes match the no
 owner-only (`0600`, or `0700` when executable).
 
 ## Failure semantics
+
+A stale workspace lock is never reclaimed automatically: without a compare-and-delete primitive, a
+stale read followed by a rename can delete a newly created live lock. Dead locks fail closed with the
+inspected pid and token; release is an explicit quiescent-node maintenance action that must name the
+exact inspected token and pid and refuses a live or replaced lock.
 
 A failure before any possible effect is a typed error. A failure after `end` may have committed; it
 is `unknown-outcome` and must be resolved with `node_workspace_status` and the same `operationId`,

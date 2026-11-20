@@ -12,7 +12,6 @@ export interface NodeHostCommandIo {
 }
 
 export const CONTROL_TIMEOUT_MS = 120_000;
-export const NODE_OPERATION_TIMEOUT_MS = 5 * 60_000;
 
 /** Build a framed session from the node command's duplex io. */
 export function sessionFromFrames(io: NodeHostCommandIo | undefined): FrameSession {

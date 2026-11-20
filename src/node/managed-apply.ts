@@ -148,7 +148,7 @@ export interface ApplyOptions {
   readonly previous: WorkspaceRecord | undefined;
   readonly workspaceId: string;
   readonly localProject: string;
-  readonly owner: { readonly agentId: string | null; readonly sessionKey: string | null };
+  readonly owner: { readonly agentId: string; readonly sessionKey: string | null; readonly assertedBy: "gateway" };
   readonly epoch: number;
   readonly rebind: boolean;
   readonly fingerprint: string;
@@ -170,8 +170,7 @@ function buildCommitResult(options: ApplyOptions): CommitResult {
     if (entry.kind === "delete") files.delete(entry.path);
     else if (entry.after !== null) files.set(entry.path, entry.after);
   }
-  const directories = new Set<string>(options.previous?.directories ?? []);
-  for (const directory of options.plan.directories) directories.add(directory);
+  const directories = new Set<string>(options.plan.directories);
   const sortedFiles = sortEntries([...files.values()]);
   const sortedDirectories = [...directories].sort((left, right) =>
     Buffer.compare(Buffer.from(left), Buffer.from(right)),
@@ -228,6 +227,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     workspaceId: options.workspaceId,
     baseRevision: options.plan.baseRevision,
     planDigest: options.plan.digest,
+    counts: options.plan.counts,
     phase: "prepared",
     entries,
     createdAt,
@@ -265,6 +265,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     );
   }
   await assertFence(options.lock);
+  injectedCrash("after-applying-journal");
 
   if (options.previous !== undefined) {
     await writeRecord(options.paths.stateDir, workspaceKey(options.plan.remotePath), {
@@ -404,7 +405,14 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     if (error instanceof InjectedCrash) throw error;
     try {
       await rollbackJournal(options.destination, options.paths, entries);
-      await finishInterrupted(options.paths, options.previous, options.lock, options.fingerprint);
+      await finishInterrupted(
+        options.paths,
+        options.previous,
+        options.lock,
+        options.fingerprint,
+        options.plan.digest,
+        options.plan.counts,
+      );
     } catch {
       // A failed rollback leaves the journal in place so the next operation
       // reports recovery-blocked instead of pretending the base is intact.
@@ -422,6 +430,12 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
     );
   }
 
+  const previous = options.previous;
+  const stateStat = await fs.stat(options.paths.stateDir);
+  const reboundFrom =
+    options.rebind && previous !== undefined && previous.localProject !== options.localProject
+      ? [...(previous.reboundFrom ?? []), previous.localProject]
+      : previous?.reboundFrom;
   const commitJournal: Journal = {
     ...prepared,
     phase: "committed",
@@ -434,6 +448,20 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
       released: options.plan.releasedAfter as ReleasedEntry[],
       operationId: options.lock.operationId,
       fingerprint: options.fingerprint,
+      planDigest: options.plan.digest,
+      counts: options.plan.counts,
+      root: options.root,
+      localProject: options.localProject,
+      owner: options.owner,
+      epoch: options.epoch,
+      rebind: options.rebind,
+      ...(reboundFrom !== undefined ? { reboundFrom } : {}),
+      stateDir: previous?.stateDir ?? {
+        path: options.paths.stateDir,
+        dev: stateStat.dev,
+        ino: stateStat.ino,
+      },
+      createdAt: previous?.createdAt ?? createdAt,
     } satisfies JournalCommit,
     updatedAt: nowIso(),
   };
@@ -443,6 +471,7 @@ export async function applyTransaction(options: ApplyOptions): Promise<CommitRes
   await finalizeCommitted(options, commitJournal);
   injectedCrash("after-record");
   await cleanupTransaction(options.paths);
+  injectedCrash("after-cleanup");
   return commit;
 }
 
@@ -451,6 +480,8 @@ async function finishInterrupted(
   previous: WorkspaceRecord | undefined,
   lock: LockHandle,
   fingerprint: string,
+  planDigest: string,
+  counts: import("../managed-plan.js").PlanCounts,
 ): Promise<void> {
   const now = nowIso();
   if (previous !== undefined) {
@@ -460,6 +491,8 @@ async function finishInterrupted(
       outcome: "interrupted",
       revision: previous.revision,
       digest: previous.digest,
+      planDigest,
+      counts,
     });
     await writeRecord(paths.stateDir, workspaceKey(previous.remotePath), {
       ...previous,
@@ -484,21 +517,19 @@ async function finalizeCommitted(
     outcome: "committed",
     revision: committed.revision,
     digest: committed.digest,
+    planDigest: committed.planDigest,
+    counts: committed.counts,
   });
   const previous = options.previous;
-  const stateStat = await fs.stat(options.paths.stateDir);
   const live = options.rebind ? {} : liveReceipts(previous?.receipts ?? {}, nowMs());
-  const reboundFrom = options.rebind && previous !== undefined && previous.localProject !== options.localProject
-    ? [...(previous.reboundFrom ?? []), previous.localProject]
-    : previous?.reboundFrom;
   const record: WorkspaceRecord = {
     version: 1,
     workspaceId: journal.workspaceId,
     remotePath: journal.remotePath,
-    root: previous?.root ?? options.root,
-    localProject: options.localProject,
-    owner: options.owner,
-    epoch: options.epoch,
+    root: committed.root,
+    localProject: committed.localProject,
+    owner: committed.owner,
+    epoch: committed.epoch,
     revision: committed.revision,
     digest: committed.digest,
     files: committed.files,
@@ -506,10 +537,10 @@ async function finalizeCommitted(
     policy: committed.policy,
     released: committed.released,
     readiness: "ready",
-    stateDir: previous?.stateDir ?? { path: options.paths.stateDir, dev: stateStat.dev, ino: stateStat.ino },
+    stateDir: committed.stateDir,
     receipts: { ...live, [committed.operationId]: receipt },
-    ...(reboundFrom ? { reboundFrom } : {}),
-    createdAt: previous?.createdAt ?? now,
+    ...(committed.reboundFrom ? { reboundFrom: committed.reboundFrom } : {}),
+    createdAt: committed.createdAt,
     updatedAt: now,
   };
   await writeRecord(options.paths.stateDir, workspaceKey(journal.remotePath), record);
@@ -650,8 +681,21 @@ export async function recoverTransaction(
   const record = await readRecord(paths.stateDir, key);
   if (journal.phase === "committed") {
     const committed = journal.commit;
-    if (committed === undefined) {
-      throw new NodeWorkspaceError("recovery-blocked", "committed journal has no commit record");
+    if (
+      committed === undefined ||
+      typeof committed.localProject !== "string" ||
+      committed.localProject.length === 0 ||
+      committed.owner === undefined ||
+      typeof committed.owner.agentId !== "string" ||
+      committed.owner.agentId.length === 0 ||
+      committed.stateDir === undefined ||
+      typeof committed.stateDir.path !== "string" ||
+      typeof committed.epoch !== "number"
+    ) {
+      throw new NodeWorkspaceError(
+        "recovery-blocked",
+        "the committed journal does not carry the full owner, project, epoch and state-directory binding; an operator must reconcile it",
+      );
     }
     const now = nowIso();
     const receipt = makeReceipt({
@@ -660,15 +704,17 @@ export async function recoverTransaction(
       outcome: "committed",
       revision: committed.revision,
       digest: committed.digest,
+      planDigest: committed.planDigest,
+      counts: committed.counts,
     });
     const restored: WorkspaceRecord = {
       version: 1,
       workspaceId: journal.workspaceId,
       remotePath: journal.remotePath,
-      root: record?.root ?? path.dirname(paths.stateDir),
-      localProject: record?.localProject ?? "",
-      owner: record?.owner ?? { agentId: null, sessionKey: null },
-      epoch: record?.epoch ?? 1,
+      root: committed.root,
+      localProject: committed.localProject,
+      owner: committed.owner,
+      epoch: committed.epoch,
       revision: committed.revision,
       digest: committed.digest,
       files: committed.files,
@@ -676,10 +722,12 @@ export async function recoverTransaction(
       policy: committed.policy,
       released: committed.released,
       readiness: "ready",
-      stateDir: record?.stateDir ?? { path: paths.stateDir, dev: 0, ino: 0 },
-      receipts: { ...(record?.receipts ?? {}), [committed.operationId]: receipt },
-      ...(record?.reboundFrom ? { reboundFrom: record.reboundFrom } : {}),
-      createdAt: record?.createdAt ?? now,
+      stateDir: committed.stateDir,
+      receipts: committed.rebind
+        ? { [committed.operationId]: receipt }
+        : { ...(record?.receipts ?? {}), [committed.operationId]: receipt },
+      ...(committed.reboundFrom ? { reboundFrom: committed.reboundFrom } : {}),
+      createdAt: committed.createdAt,
       updatedAt: now,
     };
     await writeRecord(paths.stateDir, key, restored);
@@ -720,6 +768,8 @@ export async function recoverTransaction(
     outcome: "interrupted",
     revision: record?.revision ?? 0,
     digest: record?.digest ?? "",
+    planDigest: journal.planDigest,
+    counts: journal.counts,
   });
   if (record !== undefined) {
     await writeRecord(paths.stateDir, key, {

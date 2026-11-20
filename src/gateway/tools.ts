@@ -47,6 +47,25 @@ function requireConfig(deps: ToolDependencies): GatewayConfig {
   return deps.config;
 }
 
+function requireOwner(deps: ToolDependencies): {
+  readonly agentId: string;
+  readonly sessionKey: string | null;
+  readonly assertedBy: "gateway";
+} {
+  const agentId = deps.scope?.agentId;
+  if (typeof agentId !== "string" || agentId.length === 0) {
+    throw new NodeWorkspaceError(
+      "identity-unresolved",
+      "the host supplied no agent identity for this turn; refusing to bind or query a managed workspace",
+    );
+  }
+  return {
+    agentId,
+    sessionKey: deps.scope?.sessionKey ?? null,
+    assertedBy: "gateway",
+  };
+}
+
 function requireWorkspace(deps: ToolDependencies, operation: string): string {
   if (deps.workspaceDir !== undefined && deps.workspaceDir.length > 0) return deps.workspaceDir;
   const detail = deps.workspaceError ?? "the host resolved no workspace directory for this session";
@@ -502,10 +521,7 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
             expectedRevision: input.expectedRevision,
             planDigest: input.planDigest,
             policy: input.policy,
-            owner: {
-              agentId: scope?.agentId ?? null,
-              sessionKey: scope?.sessionKey ?? null,
-            },
+            owner: requireOwner(deps),
             signal,
             progress: (progress) => {
               if (tracked) tracked.store.updateFromSync(tracked.scope, transferId, progress);
@@ -621,8 +637,10 @@ export function createTools(deps: ToolDependencies): AnyAgentTool[] {
           const verify = record.verify === undefined ? undefined : record.verify === true;
           const limit = typeof record.limit === "number" ? record.limit : undefined;
           context = { node, ...(remotePath !== undefined ? { remotePath } : {}), ...(operationId ? { operationId } : {}) };
+          const owner = requireOwner(deps);
           const outcome = await managedStatus(deps.transport, config, {
             node,
+            owner,
             ...(remotePath !== undefined ? { remotePath } : {}),
             ...(operationId !== undefined ? { operationId } : {}),
             ...(verify !== undefined ? { verify } : {}),

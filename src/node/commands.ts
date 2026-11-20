@@ -1,6 +1,5 @@
 import type { NodeConfig } from "../config.js";
 import { resolvePluginConfig } from "../config.js";
-import { COMMAND_FETCH, COMMAND_STATUS, COMMAND_SYNC } from "../protocol.js";
 import { createFetchCommand } from "./fetch.js";
 import { createNodeCommands as createManagedCommands } from "./managed.js";
 import type { NodeHostCommand } from "./managed.js";
@@ -37,4 +36,3 @@ export function createNodeCommands(rawConfig: unknown): NodeCommandSet {
   };
 }
 
-export const NODE_COMMANDS = [COMMAND_SYNC, COMMAND_STATUS, COMMAND_FETCH] as const;

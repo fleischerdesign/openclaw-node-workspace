@@ -27,6 +27,9 @@ export type NodeWorkspaceErrorCode =
   | "receipt-expired"
   | "workspace-locked"
   | "workspace-forbidden"
+  | "identity-unresolved"
+  | "policy-violation"
+  | "create-not-authorized"
   | "recovery-blocked"
   | "not-a-file"
   | "local-conflict"
@@ -72,4 +75,47 @@ export function errorMessage(value: unknown): string {
 export function isErrno(error: unknown, ...codes: string[]): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" && codes.includes(code);
+}
+
+const NODE_WORKSPACE_ERROR_CODES: ReadonlySet<string> = new Set<NodeWorkspaceErrorCode>([
+  "config-invalid",
+  "path-invalid",
+  "path-outside-root",
+  "workspace-unresolved",
+  "path-not-found",
+  "not-a-directory",
+  "symlink-rejected",
+  "special-file-rejected",
+  "limit-exceeded",
+  "invalid-manifest",
+  "destination-exists",
+  "destination-drifted",
+  "node-not-configured",
+  "node-rejected",
+  "protocol",
+  "integrity",
+  "transport",
+  "timeout",
+  "canceled",
+  "conflict",
+  "plan-stale",
+  "revision-mismatch",
+  "operation-mismatch",
+  "preview-required",
+  "receipt-quota-exceeded",
+  "receipt-expired",
+  "workspace-locked",
+  "workspace-forbidden",
+  "identity-unresolved",
+  "policy-violation",
+  "create-not-authorized",
+  "recovery-blocked",
+  "not-a-file",
+  "local-conflict",
+  "unknown-outcome",
+  "io",
+]);
+
+export function isNodeWorkspaceErrorCode(value: unknown): value is NodeWorkspaceErrorCode {
+  return typeof value === "string" && NODE_WORKSPACE_ERROR_CODES.has(value);
 }

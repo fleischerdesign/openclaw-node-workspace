@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import type { NodeConfig, PluginConfig } from "../config.js";
@@ -8,14 +9,13 @@ import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import {
   buildManagedPlan,
   type ManagedPlan,
-  type PlanCounts,
   type PlanEntry,
 } from "../managed-plan.js";
 import { nowMs } from "../clock.js";
-import { resolvePolicy, type ResolvedPolicy } from "../policy.js";
+import { isExcluded, isProtected, isSelected, resolvePolicy, type ResolvedPolicy } from "../policy.js";
 import { assertReceiptQuota, receiptIsLive, receiptState } from "../receipts.js";
 import {
-  NODE_RESPONSE_GRACE_MS,
+  nodeDeadline,
   parseStatusRequest,
   parseSyncHello,
   type SyncHello,
@@ -53,7 +53,6 @@ import { readControl, remaining, sessionFromFrames, type NodeHostCommandIo } fro
 export interface NodeHostCommandContext {
   readonly signal?: AbortSignal;
   readonly sessionKey?: string;
-  readonly agentId?: string;
 }
 
 export interface NodeHostCommand {
@@ -118,13 +117,27 @@ function validateLocalManifest(hello: SyncHello, limits: NodeConfig): void {
   }
   const seen = new Set<string>();
   let totalBytes = 0;
+  const selectedFiles = new Set(hello.manifest.map((entry) => entry.path).filter((entry) => isSelected(entry, hello.policy)));
+  const checkPolicy = (candidate: string, directory: boolean): void => {
+    if (isExcluded(candidate, hello.policy)) {
+      throw new NodeWorkspaceError("policy-violation", `${candidate} is an excluded cache or dependency path`);
+    }
+    if (isProtected(candidate, hello.policy)) {
+      throw new NodeWorkspaceError("policy-violation", `${candidate} is a protected path and must not cross the channel`);
+    }
+    if (isSelected(candidate, hello.policy)) return;
+    if (directory && [...selectedFiles].some((entry) => entry.startsWith(`${candidate}/`))) return;
+    throw new NodeWorkspaceError("policy-violation", `${candidate} is outside the selected source set`);
+  };
   for (const directory of hello.directories) {
     assertSafeRelativePath(directory, "directory path");
+    checkPolicy(directory, true);
     if (seen.has(directory)) throw new NodeWorkspaceError("invalid-manifest", `duplicate path ${directory}`);
     seen.add(directory);
   }
   for (const entry of hello.manifest) {
     assertSafeRelativePath(entry.path);
+    checkPolicy(entry.path, false);
     if (seen.has(entry.path)) throw new NodeWorkspaceError("invalid-manifest", `duplicate path ${entry.path}`);
     seen.add(entry.path);
     if (entry.size > limits.maxFileBytes) {
@@ -157,41 +170,44 @@ function validateLocalManifest(hello: SyncHello, limits: NodeConfig): void {
   }
 }
 
-function ownerFromContext(
+/**
+ * The node has no SDK field that attests an agent id. It has the Gateway-invoked
+ * session key, which must agree with the asserted session when both exist. The
+ * agent id is a Gateway assertion trusted inside the authenticated host channel;
+ * it is not a cryptographic node-side attestation of the caller.
+ */
+function assertedOwner(
   hello: SyncHello,
   context: NodeHostCommandContext | undefined,
-): { agentId: string | null; sessionKey: string | null } {
-  const contextAgent = typeof context?.agentId === "string" && context.agentId.length > 0 ? context.agentId : null;
-  const contextSession =
-    typeof context?.sessionKey === "string" && context.sessionKey.length > 0 ? context.sessionKey : null;
-  if (hello.owner.agentId !== null && contextAgent !== null && hello.owner.agentId !== contextAgent) {
+): { agentId: string; sessionKey: string | null; assertedBy: "gateway" } {
+  const agentId = hello.owner.agentId;
+  if (agentId === null || agentId.length === 0) {
     throw new NodeWorkspaceError(
-      "workspace-forbidden",
-      "the calling session's authenticated agent does not match the agent named in the request",
+      "identity-unresolved",
+      "the Gateway asserted no agent identity for this managed operation; refusing to bind or access a workspace",
     );
   }
-  return {
-    agentId: contextAgent ?? hello.owner.agentId,
-    sessionKey: contextSession ?? hello.owner.sessionKey,
-  };
+  const contextSession =
+    typeof context?.sessionKey === "string" && context.sessionKey.length > 0 ? context.sessionKey : null;
+  if (contextSession !== null && hello.owner.sessionKey !== null && contextSession !== hello.owner.sessionKey) {
+    throw new NodeWorkspaceError(
+      "workspace-forbidden",
+      "the node invocation session does not match the Gateway-asserted session for this operation",
+    );
+  }
+  return { agentId, sessionKey: hello.owner.sessionKey, assertedBy: "gateway" };
 }
 
 function assertOwnership(
   record: WorkspaceRecord | undefined,
   hello: SyncHello,
-  owner: { agentId: string | null },
+  owner: { agentId: string },
 ): void {
   if (record === undefined) return;
   if (record.remotePath !== hello.remotePath) {
     throw new NodeWorkspaceError("workspace-forbidden", "the registry record belongs to another remote path");
   }
-  if (record.owner.agentId !== null && owner.agentId === null) {
-    throw new NodeWorkspaceError(
-      "workspace-forbidden",
-      "this managed workspace is bound to an authenticated agent and this call carries no authenticated identity",
-    );
-  }
-  if (record.owner.agentId !== null && owner.agentId !== null && record.owner.agentId !== owner.agentId) {
+  if (record.owner.agentId !== owner.agentId) {
     throw new NodeWorkspaceError(
       "workspace-forbidden",
       "this managed workspace belongs to another authenticated agent; a marker or display name is not authority",
@@ -280,6 +296,18 @@ function payloadEntries(plan: ManagedPlan): PlanEntry[] {
   );
 }
 
+/**
+ * Durability order for one staged payload: sync the file's data first, then
+ * close. Directory fsync later covers the name, not the bytes.
+ */
+export async function closeStagedPayload(handle: Pick<FileHandle, "sync" | "close">): Promise<void> {
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 async function stageIncomingFiles(
   session: FrameSession,
   paths: StatePaths,
@@ -299,7 +327,7 @@ async function stageIncomingFiles(
     if (open === undefined) return;
     const current = open;
     open = undefined;
-    await current.handle.close();
+    await closeStagedPayload(current.handle);
     const actual = current.hash.digest("hex");
     if (current.entry.after === null || actual !== current.entry.after.sha256 || current.received !== current.entry.after.size) {
       throw new NodeWorkspaceError("integrity", `staged payload failed verification: ${current.entry.path}`);
@@ -392,8 +420,8 @@ async function handleSync(
     validateLocalManifest(hello, config);
     const destination = await resolveManagedDestination(hello.remotePath, config.pushRoots);
     const key = workspaceKey(destination.destination);
-    const deadline = Date.now() + Math.max(1_000, hello.timeoutMs - NODE_RESPONSE_GRACE_MS);
-    const owner = ownerFromContext(hello, context);
+    const deadline = nodeDeadline(hello.timeoutMs);
+    const owner = assertedOwner(hello, context);
     const fingerprint = helloFingerprint(hello);
     const signal = io?.signal ?? context?.signal;
 
@@ -453,8 +481,8 @@ async function handleSync(
           operationId: hello.operationId,
           revision: existing.revision,
           digest: existing.digest,
-          planDigest: "",
-          counts: emptyCounts(),
+          planDigest: existing.planDigest,
+          counts: existing.counts,
           applied: [],
           truncated: false,
           caches: "preserved-not-validated",
@@ -466,7 +494,6 @@ async function handleSync(
         await session.sendControl(result);
         return JSON.stringify({ ok: true, replayed: true, revision: existing.revision });
       }
-      assertReceiptQuota(record.receipts, nowMs());
     }
 
     // A policy transition is a decision, not an incidental update.
@@ -531,6 +558,12 @@ async function handleSync(
         "this update changes deletions, policy, adoption or the binding; apply it with the planDigest from a fresh preview",
       );
     }
+    if (record === undefined && !hello.create && !hello.adopt) {
+      throw new NodeWorkspaceError(
+        "create-not-authorized",
+        "this managed workspace does not exist and the request did not authorize creation or adoption",
+      );
+    }
     if (hello.rebind && hello.planDigest === undefined) {
       throw new NodeWorkspaceError("preview-required", "a rebind needs a pinned preview of both bindings");
     }
@@ -571,6 +604,10 @@ async function handleSync(
       return JSON.stringify({ ok: true, status: "noop", revision });
     }
 
+    if (plan.entries.length > 0 || plan.createRequired || plan.policyChanged || hello.rebind || hello.adoptPaths.length > 0) {
+      assertReceiptQuota(record?.receipts ?? {}, nowMs());
+    }
+
     await session.sendControl({
       t: "plan",
       planDigest: plan.digest,
@@ -607,7 +644,7 @@ async function handleSync(
       previous: baseRecord,
       workspaceId: previous?.workspaceId ?? workspaceKey(destination.destination),
       localProject: hello.localProject,
-      owner: { agentId: owner.agentId, sessionKey: owner.sessionKey },
+      owner: { agentId: owner.agentId, sessionKey: owner.sessionKey, assertedBy: owner.assertedBy },
       epoch,
       rebind: hello.rebind,
       fingerprint,
@@ -660,9 +697,6 @@ async function handleSync(
   }
 }
 
-function emptyCounts(): PlanCounts {
-  return { add: 0, change: 0, delete: 0, mode: 0, restore: 0, adopt: 0, conflicts: 0, unchanged: 0, untracked: 0, released: 0 };
-}
 
 interface DirtySummary {
   readonly nodeChanged: number;
@@ -705,8 +739,18 @@ async function handleStatus(
     throw new NodeWorkspaceError("protocol", "status parameters are not valid JSON");
   }
   const request = parseStatusRequest(raw);
-  const agentId =
-    typeof context?.agentId === "string" && context.agentId.length > 0 ? context.agentId : null;
+  const agentId = request.owner.agentId;
+  if (agentId === null || agentId.length === 0) {
+    throw new NodeWorkspaceError(
+      "identity-unresolved",
+      "status requires the Gateway-asserted agent identity; refusing to expose registry detail",
+    );
+  }
+  const contextSession =
+    typeof context?.sessionKey === "string" && context.sessionKey.length > 0 ? context.sessionKey : null;
+  if (contextSession !== null && request.owner.sessionKey !== null && contextSession !== request.owner.sessionKey) {
+    throw new NodeWorkspaceError("workspace-forbidden", "the status session does not match the asserted session");
+  }
 
   if (request.remotePath === undefined) {
     const limit = Math.min(request.limit ?? 50, 200);
@@ -721,7 +765,7 @@ async function handleStatus(
       }
       const records = await listRecords(stateDir);
       for (const record of records) {
-        if (agentId !== null && record.owner.agentId !== null && record.owner.agentId !== agentId) continue;
+        if (record.owner.agentId !== agentId) continue;
         if (workspaces.length >= limit) {
           truncated = true;
           break;
@@ -744,6 +788,8 @@ async function handleStatus(
 
   const remotePath = normalizeAbsolutePosixPath(request.remotePath);
   const destination = await resolveManagedDestination(remotePath, config.pushRoots);
+  const budget = request.timeoutMs ?? 120_000;
+  const deadline = nodeDeadline(budget);
   const destinationExists = await fs.lstat(destination.destination).then(
     (stat) => ({ exists: true, directory: stat.isDirectory() && !stat.isSymbolicLink() }),
     (error: unknown) => {
@@ -761,7 +807,7 @@ async function handleStatus(
   }
   const key = workspaceKey(destination.destination);
   const record = stateDir === undefined ? undefined : await readRecord(stateDir, key);
-  if (record !== undefined && agentId !== null && record.owner.agentId !== null && record.owner.agentId !== agentId) {
+  if (record !== undefined && record.owner.agentId !== agentId) {
     throw new NodeWorkspaceError("workspace-forbidden", "this managed workspace belongs to another agent");
   }
   const paths = statePaths(destination.root, key);
@@ -784,8 +830,8 @@ async function handleStatus(
       destination.destination,
       record?.policy ?? resolvePolicy(undefined),
       config,
-      Date.now() + Math.max(5_000, config.maxFiles * 100),
-      undefined,
+      deadline,
+      context?.signal,
     );
     protectedCount = scan.protectedCount;
     if (record !== undefined) dirty = summarize(record, scan);

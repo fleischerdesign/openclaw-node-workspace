@@ -57,6 +57,10 @@ Rules:
 
 - Only previously managed, still-selected base files missing locally are deletion candidates.
 - A node file that differs from the base blocks the update (`node-modified`).
+- Node and local bytes that converged independently of the base become a verified `adopt` entry
+  (no transfer), so the next edit or deletion works.
+- The committed directory manifest is the selected local shape, not a union of every directory that
+  ever existed.
 - A node-absent base file is `node-missing` unless the pinned preview listed it in `restore`.
 - A local addition colliding with an untracked node file blocks, even with equal bytes.
 - A file/directory type change cannot remove unmanaged descendants.
@@ -86,18 +90,21 @@ window during a backup-first replacement, and native `exec` does not participate
 
 ### Locks
 
-One lock per workspace. A live owner always blocks, regardless of age. A lock is reclaimed only when
-the recorded PID is absent or its process start time differs. An unreadable lock blocks. Each
-mutation phase re-checks the lock token (fencing), so a late handler cannot write after its lock was
-replaced.
+One lock per workspace. A live owner always blocks, regardless of age. An unreadable lock blocks. A
+lock whose recorded process is provably dead also blocks: POSIX offers no compare-and-delete, so
+automatic reclamation could remove a live replacement created between the read and the unlink. The
+error names the inspected pid/token; release is an explicit quiescent-node maintenance action that
+must present that exact token and pid and refuses a live or replaced lock. Each mutation phase
+re-checks the lock token (fencing), so a late handler cannot write after its lock was replaced.
 
 ## Idempotency
 
 An apply carries a stable 32-hex `operationId`. The registry stores a request fingerprint and outcome
 under that id. A committed receipt is returned again after later revisions advance. A different
 request under the same id is `operation-mismatch`. An interrupted receipt allows resuming the same
-intent; it is never treated as success. Receipts expire after seven days and are capped at 64
-unexpired entries per workspace; a full quota refuses new work rather than evicting live receipts.
+intent; it is never treated as success. Receipts expire after seven days and are bounded by a committed-entry quota (4096) and a 2 MiB live
+ledger; a full quota refuses a mutation rather than evicting live receipts, while preview and no-op
+still work. Interrupted or rolled-back attempts do not consume the committed quota.
 
 ## Status
 

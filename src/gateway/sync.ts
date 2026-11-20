@@ -317,6 +317,7 @@ export async function syncManaged(
     const local = localEntries(scan);
     let filesDone = 0;
     let bytesDone = 0;
+    const bytesTotal = payload.reduce((total, entry) => total + (entry.after?.size ?? 0), 0);
     let lastProgressAt = 0;
     const report = (phase: SyncProgress["phase"], force = false): void => {
       const now = Date.now();
@@ -327,7 +328,7 @@ export async function syncManaged(
         filesDone,
         filesTotal: payload.length,
         bytesDone,
-        bytesTotal: scan.totalBytes,
+        bytesTotal,
       });
     };
 
@@ -424,8 +425,10 @@ export async function syncManaged(
     }
     await flush();
     report("applying", true);
-    await session.sendControl({ t: "end" });
+    // The frame may be delivered before send() rejects. Mark the possible
+    // commit before the attempt so a delivered-then-error send is unknown.
     sentEnd = true;
+    await session.sendControl({ t: "end" });
 
     for (;;) {
       const value = await nextControl(session, deadline);

@@ -1,4 +1,4 @@
-import { NodeWorkspaceError, errorMessage } from "../errors.js";
+import { NodeWorkspaceError, errorMessage, isNodeWorkspaceErrorCode } from "../errors.js";
 import type { DuplexChannel, NodeTransport, OpenDuplexRequest } from "../transport.js";
 
 interface RuntimeNodeChannel {
@@ -32,6 +32,39 @@ interface RuntimeLike {
   };
 }
 
+function codedFailure(error: unknown): NodeWorkspaceError | undefined {
+  if (error instanceof NodeWorkspaceError) return error;
+  const record = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : undefined;
+  const candidates: Record<string, unknown>[] = [];
+  if (record !== undefined) {
+    candidates.push(record);
+    for (const key of ["payloadJSON", "payload"] as const) {
+      const raw = record[key];
+      if (typeof raw === "string") {
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (typeof parsed === "object" && parsed !== null) candidates.push(parsed as Record<string, unknown>);
+        } catch {
+          // Not a structured failure; fall through to transport.
+        }
+      } else if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        candidates.push(raw as Record<string, unknown>);
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const code = candidate.code;
+    if (!isNodeWorkspaceErrorCode(code)) continue;
+    const message = typeof candidate.message === "string" ? candidate.message : `node rejected the command (${code})`;
+    const details =
+      typeof candidate.details === "object" && candidate.details !== null && !Array.isArray(candidate.details)
+        ? (candidate.details as Record<string, unknown>)
+        : {};
+    return new NodeWorkspaceError(code, message, details, { cause: error });
+  }
+  return undefined;
+}
+
 /** Wrap the public plugin runtime in the narrow transport this plugin needs. */
 export function createNodeTransport(runtime: RuntimeLike): NodeTransport {
   return {
@@ -56,6 +89,8 @@ export function createNodeTransport(runtime: RuntimeLike): NodeTransport {
       try {
         return await runtime.nodes.invoke(request);
       } catch (error) {
+        const coded = codedFailure(error);
+        if (coded !== undefined) throw coded;
         throw new NodeWorkspaceError("transport", `node command failed: ${errorMessage(error)}`, {}, { cause: error });
       }
     },

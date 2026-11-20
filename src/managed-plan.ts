@@ -215,9 +215,9 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
       continue;
     }
     if (entryEqual(node, local)) {
-      // The node already holds the selected bytes. Adopt them as the base
-      // without rewriting the file (and without claiming a content change).
-      unchanged += 1;
+      // The node and the local source converged independently of the base.
+      // Record the verified bytes as the new base without rewriting them.
+      entries.push({ kind: "adopt", path, before, after: local });
       continue;
     }
     if (!nodeUnchanged && !localUnchanged) {
@@ -305,7 +305,18 @@ export function buildManagedPlan(input: ManagedPlanInput): ManagedPlan {
   const sortedConflicts = byPath(conflicts);
   const sortedRestorable = [...restorable].sort(comparePaths);
   const sortedReleased = byPath([...releasedAfter.values()]);
-  const sortedDirectories = [...neededDirectories].sort(comparePaths);
+  // The committed directory manifest is the selected local shape, not the
+  // union of every directory that ever existed. Empty selected directories are
+  // kept; a directory whose last file was deleted drops out.
+  const finalDirectories = new Set<string>();
+  for (const directory of input.localDirectories) {
+    if (isSelected(directory, input.policy)) finalDirectories.add(directory);
+  }
+  for (const entry of input.localFiles) {
+    for (const parent of ancestry(entry.path)) finalDirectories.add(parent);
+  }
+  for (const directory of neededDirectories) finalDirectories.add(directory);
+  const sortedDirectories = [...finalDirectories].sort(comparePaths);
 
   const counts: PlanCounts = {
     add: sortedEntries.filter((entry) => entry.kind === "add").length,

@@ -82,7 +82,7 @@ test("a node edit that differs from the base blocks the update", () => {
   assert.equal(plan.entries.length, 0);
 });
 
-test("a converged node edit is accepted without a write", () => {
+test("a converged node edit becomes a verified adopt entry", () => {
   const plan = buildManagedPlan(
     input({
       baseManifest: [entry("a.txt", sha("a"))],
@@ -90,8 +90,8 @@ test("a converged node edit is accepted without a write", () => {
       nodeFiles: [entry("a.txt", sha("b"))],
     }),
   );
-  assert.equal(plan.entries.length, 0);
-  assert.equal(plan.counts.unchanged, 1);
+  assert.deepEqual(plan.entries.map((entry) => [entry.kind, entry.path]), [["adopt", "a.txt"]]);
+  assert.equal(plan.counts.unchanged, 0);
   assert.equal(plan.conflicts.length, 0);
 });
 

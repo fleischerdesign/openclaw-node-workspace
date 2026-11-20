@@ -3,13 +3,12 @@ import fs from "node:fs/promises";
 
 import type { NodeConfig } from "../config.js";
 import { NodeWorkspaceError, errorMessage } from "../errors.js";
-import { COMMAND_FETCH, parseFetchRequest } from "../protocol.js";
+import { COMMAND_FETCH, nodeDeadline, parseFetchRequest } from "../protocol.js";
 import { resolveArtifactSource, safeArtifactMode } from "./fs-atomic.js";
 import type { NodeHostCommand, NodeHostCommandContext } from "./managed.js";
 import { sessionFromFrames, type NodeHostCommandIo } from "./session.js";
 
 const FETCH_CHUNK_BYTES = 64 * 1024;
-const FETCH_TIMEOUT_MS = 5 * 60_000;
 
 async function handleFetch(
   config: NodeConfig,
@@ -19,7 +18,6 @@ async function handleFetch(
   const session = sessionFromFrames(io);
   let metaSent = false;
   try {
-    const deadline = Date.now() + FETCH_TIMEOUT_MS;
     let raw: unknown;
     try {
       raw = JSON.parse(paramsJSON ?? "{}");
@@ -27,6 +25,8 @@ async function handleFetch(
       throw new NodeWorkspaceError("protocol", "fetch parameters are not valid JSON");
     }
     const request = parseFetchRequest(raw, config.maxArtifactBytes);
+    const budget = request.timeoutMs ?? 120_000;
+    const deadline = nodeDeadline(budget);
     const source = await resolveArtifactSource(request.remotePath, config.artifactRoots);
     const stat = await fs.lstat(source);
     const limit = Math.min(request.maxBytes, config.maxArtifactBytes);
@@ -36,6 +36,7 @@ async function handleFetch(
 
     const handle = await fs.open(source, "r");
     try {
+      if (Date.now() > deadline) throw new NodeWorkspaceError("timeout", "artifact fetch exceeded its time limit");
       await session.sendControl({ t: "meta", size: stat.size, sha256: null, mode: safeArtifactMode(stat.mode) });
       metaSent = true;
       const hash = createHash("sha256");

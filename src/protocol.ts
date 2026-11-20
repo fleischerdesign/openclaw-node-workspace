@@ -16,6 +16,11 @@ export const SYNC_ACK_BYTES = 8 * 1024 * 1024;
 /** Grace the node keeps back so it can report a typed timeout before the Gateway's budget ends. */
 export const NODE_RESPONSE_GRACE_MS = 5_000;
 
+/** Node deadline derived from the Gateway budget, with a response grace. */
+export function nodeDeadline(timeoutMs: number, now: number = Date.now()): number {
+  return now + Math.max(1_000, timeoutMs - NODE_RESPONSE_GRACE_MS);
+}
+
 export interface SyncOwner {
   readonly agentId: string | null;
   readonly sessionKey: string | null;
@@ -96,9 +101,12 @@ export type SyncResult = SyncResultSuccess | SyncResultFailure;
 export interface FetchRequest {
   readonly remotePath: string;
   readonly maxBytes: number;
+  readonly timeoutMs: number | undefined;
 }
 
 export interface StatusRequest {
+  readonly owner: { readonly agentId: string | null; readonly sessionKey: string | null };
+  readonly timeoutMs: number | undefined;
   readonly remotePath?: string;
   readonly operationId?: string;
   readonly verify?: boolean;
@@ -225,17 +233,24 @@ export function parseFetchRequest(value: unknown, nodeMaxBytes: number): FetchRe
       `requested artifact limit ${maxBytes} exceeds the node limit ${nodeMaxBytes}`,
     );
   }
-  return { remotePath, maxBytes };
+  const timeoutMs =
+    value.timeoutMs === undefined ? undefined : requireSafeInteger(value.timeoutMs, "fetch.timeoutMs", 1000);
+  return { remotePath, maxBytes, timeoutMs };
 }
 
 export function parseStatusRequest(value: unknown): StatusRequest {
   if (!isRecord(value)) throw new NodeWorkspaceError("protocol", "status parameters must be an object");
+  const owner = parseOwner(value.owner);
   const remotePath = value.remotePath === undefined ? undefined : requireString(value.remotePath, "status.remotePath");
   const operationId =
     value.operationId === undefined ? undefined : requireHex(value.operationId, "status.operationId", 32);
   const verify = value.verify === undefined ? undefined : requireBoolean(value.verify, "status.verify");
   const limit = value.limit === undefined ? undefined : requireSafeInteger(value.limit, "status.limit", 1);
+  const timeoutMs =
+    value.timeoutMs === undefined ? undefined : requireSafeInteger(value.timeoutMs, "status.timeoutMs", 1000);
   return {
+    owner,
+    timeoutMs,
     ...(remotePath !== undefined ? { remotePath } : {}),
     ...(operationId !== undefined ? { operationId } : {}),
     ...(verify !== undefined ? { verify } : {}),

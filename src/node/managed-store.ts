@@ -5,7 +5,7 @@ import path from "node:path";
 import type { ManifestEntry } from "../digest.js";
 import { NodeWorkspaceError, errorMessage, isErrno } from "../errors.js";
 import { fsyncDirectory } from "../fs-durable.js";
-import type { PlanKind, ReleasedEntry } from "../managed-plan.js";
+import type { PlanCounts, PlanKind, ReleasedEntry } from "../managed-plan.js";
 import type { ResolvedPolicy } from "../policy.js";
 import type { Receipt } from "../receipts.js";
 
@@ -25,7 +25,11 @@ export interface WorkspaceRecord {
   readonly remotePath: string;
   readonly root: string;
   readonly localProject: string;
-  readonly owner: { readonly agentId: string | null; readonly sessionKey: string | null };
+  readonly owner: {
+    readonly agentId: string;
+    readonly sessionKey: string | null;
+    readonly assertedBy: "gateway";
+  };
   readonly epoch: number;
   readonly revision: number;
   readonly digest: string;
@@ -61,6 +65,16 @@ export interface JournalCommit {
   readonly released: readonly ReleasedEntry[];
   readonly operationId: string;
   readonly fingerprint: string;
+  readonly planDigest: string;
+  readonly counts: PlanCounts;
+  readonly root: string;
+  readonly localProject: string;
+  readonly owner: WorkspaceRecord["owner"];
+  readonly epoch: number;
+  readonly rebind: boolean;
+  readonly reboundFrom?: readonly string[];
+  readonly stateDir: WorkspaceRecord["stateDir"];
+  readonly createdAt: string;
 }
 
 export interface Journal {
@@ -71,6 +85,7 @@ export interface Journal {
   readonly workspaceId: string;
   readonly baseRevision: number;
   readonly planDigest: string;
+  readonly counts: PlanCounts;
   readonly phase: "prepared" | "applying" | "committed";
   readonly entries: readonly JournalEntry[];
   readonly commit?: JournalCommit;
@@ -118,8 +133,11 @@ export async function resolveManagedDestination(
   }
   const normalized = normalizeAbsolutePosixPath(remotePath);
   const name = path.posix.basename(normalized);
-  if (name === STATE_DIR_NAME) {
-    throw new NodeWorkspaceError("path-outside-root", `${STATE_DIR_NAME} is reserved for node metadata`);
+  if (normalized.split("/").includes(STATE_DIR_NAME)) {
+    throw new NodeWorkspaceError(
+      "path-outside-root",
+      `${STATE_DIR_NAME} is reserved for node metadata and may not appear in the destination ancestry`,
+    );
   }
   const parentCandidate = path.posix.dirname(normalized);
   let parentStat;
@@ -486,9 +504,10 @@ async function readLock(file: string): Promise<LockBody | undefined> {
 /**
  * Acquire the single per-workspace mutation lock.
  *
- * A live owner always blocks, even after any timeout. A lock is stolen only
- * when the recorded process is provably gone (PID absent or start time
- * different). An unreadable lock blocks: it is never treated as free.
+ * A live owner blocks. An unreadable lock blocks. A provably dead owner also
+ * blocks: POSIX has no compare-and-delete primitive, so automatic reclamation
+ * would be a TOCTOU that can remove a newly created live lock. Stale locks are
+ * released only through explicit maintenance under a quiescent node.
  */
 export async function acquireLock(
   stateDir: string,
@@ -498,57 +517,81 @@ export async function acquireLock(
   const file = path.join(stateDir, "locks", `${key}.lock`);
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const selfStart = await processStart(process.pid);
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const body: LockBody = {
-      version: 1,
-      pid: process.pid,
-      processStart: selfStart,
-      host: "node",
-      token: randomUUID(),
-      operationId,
-      acquiredAt: Date.now(),
-    };
+  const body: LockBody = {
+    version: 1,
+    pid: process.pid,
+    processStart: selfStart,
+    host: "node",
+    token: randomUUID(),
+    operationId,
+    acquiredAt: Date.now(),
+  };
+  try {
+    const handle = await fs.open(file, "wx", 0o600);
     try {
-      const handle = await fs.open(file, "wx", 0o600);
-      try {
-        await handle.writeFile(`${JSON.stringify(body)}\n`, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await fsyncDirectory(path.dirname(file));
-      return { file, token: body.token, operationId };
-    } catch (error) {
-      if (!isErrno(error, "EEXIST")) {
-        throw new NodeWorkspaceError("io", `cannot acquire the workspace lock: ${errorMessage(error)}`, {}, {
-          cause: error,
-        });
-      }
+      await handle.writeFile(`${JSON.stringify(body)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-    const existing = await readLock(file);
-    if (existing === undefined) {
-      throw new NodeWorkspaceError(
-        "workspace-locked",
-        "another operation holds an unreadable workspace lock; inspect the node state before retrying",
-      );
+    await fsyncDirectory(path.dirname(file));
+    return { file, token: body.token, operationId };
+  } catch (error) {
+    if (!isErrno(error, "EEXIST")) {
+      throw new NodeWorkspaceError("io", `cannot acquire the workspace lock: ${errorMessage(error)}`, {}, {
+        cause: error,
+      });
     }
-    if (await processAlive(existing.pid, existing.processStart)) {
-      throw new NodeWorkspaceError(
-        "workspace-locked",
-        `workspace is locked by a live operation ${existing.operationId} (pid ${existing.pid})`,
-      );
-    }
-    // Provably dead: move the stale file aside, then retry the exclusive create.
-    const aside = `${file}.stale-${randomUUID()}`;
-    try {
-      await fs.rename(file, aside);
-    } catch (error) {
-      if (isErrno(error, "ENOENT")) continue;
-      throw new NodeWorkspaceError("io", `cannot reclaim a stale lock: ${errorMessage(error)}`, {}, { cause: error });
-    }
-    await fs.rm(aside, { force: true }).catch(() => undefined);
   }
-  throw new NodeWorkspaceError("workspace-locked", "could not acquire the workspace lock after repeated races");
+  const existing = await readLock(file);
+  if (existing === undefined) {
+    throw new NodeWorkspaceError(
+      "workspace-locked",
+      "another operation holds an unreadable workspace lock; inspect the node state before retrying",
+    );
+  }
+  if (await processAlive(existing.pid, existing.processStart)) {
+    throw new NodeWorkspaceError(
+      "workspace-locked",
+      `workspace is locked by a live operation ${existing.operationId} (pid ${existing.pid})`,
+    );
+  }
+  throw new NodeWorkspaceError(
+    "workspace-locked",
+    `workspace is locked by a dead process (pid ${existing.pid}, operation ${existing.operationId}); ` +
+      "automatic reclamation is disabled because it cannot be made race-free without a compare-and-delete primitive. " +
+      "Run the documented quiescent-node maintenance to release this exact lock.",
+    { pid: existing.pid, operationId: existing.operationId },
+  );
+}
+
+/**
+ * Explicit maintenance for one provably dead lock.
+ *
+ * Only for a quiescent node: the caller must name the exact token and pid it
+ * inspected. A replaced or live lock is never removed.
+ */
+export async function releaseStaleLockForMaintenance(
+  stateDir: string,
+  key: string,
+  expected: { readonly token: string; readonly pid: number },
+): Promise<void> {
+  const file = path.join(stateDir, "locks", `${key}.lock`);
+  const existing = await readLock(file);
+  if (existing === undefined) {
+    throw new NodeWorkspaceError("workspace-locked", "the workspace lock is absent or unreadable; nothing was removed");
+  }
+  if (existing.token !== expected.token || existing.pid !== expected.pid) {
+    throw new NodeWorkspaceError(
+      "workspace-locked",
+      "the workspace lock changed since it was inspected; refusing to remove a possible live replacement",
+    );
+  }
+  if (await processAlive(existing.pid, existing.processStart)) {
+    throw new NodeWorkspaceError("workspace-locked", "the recorded process is alive; refusing to remove its lock");
+  }
+  await fs.rm(file, { force: true });
+  await fsyncDirectory(path.dirname(file)).catch(() => undefined);
 }
 
 export async function releaseLock(handle: LockHandle): Promise<void> {

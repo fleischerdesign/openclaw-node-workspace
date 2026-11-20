@@ -126,7 +126,7 @@ export async function fetchArtifact(
     const channel = await transport.openDuplex({
       nodeId,
       command: COMMAND_FETCH,
-      params: { remotePath, maxBytes: config.maxArtifactBytes },
+      params: { remotePath, maxBytes: config.maxArtifactBytes, timeoutMs: config.timeoutMs },
       timeoutMs: config.timeoutMs,
       ...(input.signal ? { signal: input.signal } : {}),
     });

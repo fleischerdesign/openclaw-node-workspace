@@ -8,7 +8,8 @@
 | `test/managed-plan.test.ts` | Pure three-way diff, conflicts, releases, restore, adoption |
 | `test/manifest.test.ts` | Local source scan, digests, limits, symlink/special refusal |
 | `test/managed.test.ts` | Real node handlers over the in-process framed channel, real files on disk |
-| `test/receipts.test.ts` | Seven-day receipt boundary and quota without wall-clock waits |
+| `test/receipts.test.ts` | Seven-day boundary, committed-only quota and ledger bound without wall-clock waits |
+| `test/transport-errors.test.ts` | Structured node error decoding, status owner/budget, abort propagation |
 | `scripts/bench-managed.mjs` | Reproducible managed-sync benchmark and TypeScript incremental-build smoke |
 | `test/artifact.test.ts` | Real fetch handler, digest and exclusive publication |
 | `scripts/pack-and-inspect.sh` | Real loader and registered tool/command surface |
@@ -40,6 +41,20 @@ hop. No test mocks a handler to claim a behaviour the handler does not implement
   64-entry quota, driven by an explicit test clock (`NODE_WORKSPACE_TEST_NOW`).
 - Mid-apply `ENOSPC`: the first file is already replaced when the injection fires; every touched file
   is rolled back, the revision is unchanged, readiness returns to `ready`, and the retry applies.
+- Durability order: staged payload `sync()` precedes `close()`; staged bytes are re-verified before
+  mutation; `end` marks a possible commit before the send attempt, so a delivered-then-error send is
+  `unknown-outcome`.
+- Converged node/local bytes become an `adopt` base; subsequent edits and deletions work; the
+  committed directory manifest drops a directory whose last file was deleted.
+- Ownership is Gateway-asserted: missing owner, foreign owner, a mismatched invocation session and
+  forged cache/protected paths are refused. The node has no SDK agent-id field; the trust boundary is
+  documented rather than faked.
+- Dead locks fail closed; explicit maintenance refuses a replaced live lock. Reserved
+  `.nodews-state` path ancestry and `create=false` on a new path are refused.
+- Crash seams before/after the applying journal, during apply, before the registry record, after the
+  record and after cleanup; rebind-after-commit recovery from the full journal binding with a deleted
+  registry.
+- Receipt replay returns the original plan digest and counts; payload-only progress byte totals.
 
 ## Deliberate limits
 
