@@ -591,6 +591,10 @@ async function rollbackJournal(
       continue;
     }
 
+    if (entry.kind === "adopt") {
+      // Adoption never writes source; a crash cannot leave it half-applied.
+      continue;
+    }
     if (entry.kind === "add" || entry.kind === "restore") {
       if (current === undefined) continue;
       if (matchesAfter) {

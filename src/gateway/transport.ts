@@ -38,6 +38,10 @@ function codedFailure(error: unknown): NodeWorkspaceError | undefined {
   const candidates: Record<string, unknown>[] = [];
   if (record !== undefined) {
     candidates.push(record);
+    const nested = record.error;
+    if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) {
+      candidates.push(nested as Record<string, unknown>);
+    }
     for (const key of ["payloadJSON", "payload"] as const) {
       const raw = record[key];
       if (typeof raw === "string") {
