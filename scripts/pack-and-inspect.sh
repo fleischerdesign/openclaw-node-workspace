@@ -48,6 +48,7 @@ grep -q "OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE" "$WORK/install.log" && {
 
 echo "== installed operator maintenance script"
 MAINTENANCE="$(find "$PROFILE/state/npm/projects" -path '*/scripts/lock-maintenance.mjs' -print -quit)"
+echo "installed maintenance: $MAINTENANCE"
 [[ -n "$MAINTENANCE" ]] || {
   echo "FAIL: installed package does not contain scripts/lock-maintenance.mjs" >&2
   exit 1
