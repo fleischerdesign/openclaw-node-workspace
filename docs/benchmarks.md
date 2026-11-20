@@ -19,7 +19,7 @@ real files on disk. Only the network hop is a test double. It is one run, not a 
 | Fixture | 160 source files × 4096 B (655,360 B), one protected `.env` |
 | Cache | 2,048 dependency files × 16,384 B (33,554,432 B), installed on the node after creation |
 | Policy | preset `node` (excludes `node_modules`, `dist`, `.git`, common caches) |
-| Peak RSS | 102,180 KiB |
+| Peak RSS | 99,436 KiB |
 | Report | [2026-11-20-mob-nb-01.json](benchmarks/2026-11-20-mob-nb-01.json) |
 
 ## Results
@@ -28,15 +28,15 @@ All times are milliseconds. `transferred` is the wire payload reported by the sy
 
 | Scenario | Cache absent | Cache present (32 MiB) |
 | --- | ---: | ---: |
-| Cold preview | 194.88 | 141.34 |
-| Cold apply | 397.14 | 380.60 |
+| Cold preview | 179.78 | 143.32 |
+| Cold apply | 396.87 | 410.87 |
 | Cold transferred bytes | 654,570 | 654,570 |
-| No-op apply, single | 254.45 | 237.48 |
-| No-op apply, p50 of 5 | 227.00 | 227.36 |
+| No-op apply, single | 249.49 | 221.81 |
+| No-op apply, p50 of 5 | 231.69 | 221.81 |
 | No-op transferred bytes | 0 | 0 |
-| One-file update | 254.84 | 237.51 |
+| One-file update | 258.60 | 250.92 |
 | One-file transferred bytes | 4,090 | 4,090 |
-| Exact deletion apply | 238.78 | 236.08 |
+| Exact deletion apply | 254.55 | 235.05 |
 | Deletion transferred bytes | 0 | 0 |
 | Revision after deletion | 3 | 3 |
 | Protected paths reported | 1 | 1 |
@@ -71,9 +71,9 @@ A two-file TypeScript project was created and synced with policy `node`. `tsc --
 
 | Step | Result |
 | --- | --- |
-| Cold build | 727.01 ms |
-| No-op sync, then build | 305.63 ms |
-| One source edit, sync, then build | 311.65 ms |
+| Cold build | 1,056.09 ms |
+| No-op sync, then build | 519.23 ms |
+| One source edit, sync, then build | 353.20 ms |
 | `dist/` untouched by the no-op sync | 3 files checked, 0 changed |
 | `dist/` untouched by the edit sync | 3 files checked, 0 changed |
 | Edited output changed after rebuild | yes |
