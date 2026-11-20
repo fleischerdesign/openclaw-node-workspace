@@ -785,6 +785,7 @@ export async function recoverTransaction(
       if (record !== undefined) {
         await writeRecord(paths.stateDir, key, {
           ...record,
+          receipts: boundReceipts(record.receipts, nowMs(), journal.operationId),
           readiness: "recovery-blocked",
           updatedAt: nowIso(),
         });
